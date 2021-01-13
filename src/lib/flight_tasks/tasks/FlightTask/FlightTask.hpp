@@ -53,6 +53,7 @@
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_trajectory_waypoint.h>
 #include <uORB/topics/home_position.h>
+#include <lib/ecl/geo/geo.h>
 #include <lib/weather_vane/WeatherVane.hpp>
 
 struct ekf_reset_counters_s {
@@ -216,6 +217,9 @@ protected:
 	virtual void _ekfResetHandlerPositionZ() {};
 	virtual void _ekfResetHandlerVelocityZ() {};
 	virtual void _ekfResetHandlerHeading(float delta_psi) {};
+
+	map_projection_reference_s _global_local_proj_ref{};
+	float                      _global_local_alt0{NAN};
 
 	/* Time abstraction */
 	static constexpr uint64_t _timeout = 500000; /**< maximal time in us before a loop or data times out */
