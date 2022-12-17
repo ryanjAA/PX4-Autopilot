@@ -1,6 +1,6 @@
 ############################################################################
 #
-#   Copyright (c) 2019 PX4 Development Team. All rights reserved.
+#   Copyright (c) 2020 PX4 Development Team. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -31,11 +31,9 @@
 #
 ############################################################################
 
-add_subdirectory(../stm32_common/io_pins io_pins)
-add_subdirectory(../stm32_common/hrt hrt)
-add_subdirectory(../stm32_common/board_critmon board_critmon)
-add_subdirectory(../stm32_common/board_reset board_reset)
-add_subdirectory(../stm32_common/version version)
+px4_add_library(arch_spi
+	spi.cpp
+)
+target_compile_options(arch_spi PRIVATE ${MAX_CUSTOM_OPT_LEVEL})
 
-add_subdirectory(spi)
-add_subdirectory(watchdog)
+target_link_libraries (arch_spi PRIVATE drivers_board) # px4_spi_buses
