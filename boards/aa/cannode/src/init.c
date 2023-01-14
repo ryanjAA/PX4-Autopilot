@@ -121,8 +121,8 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 
 #if defined(FLASH_BASED_PARAMS)
 	static sector_descriptor_t params_sector_map[] = {
-		{8, 2 * 1024, 0x08004000},
-		{9, 2 * 1024, 0x08004800},
+		{7, 2 * 1024, 0x08004000},
+		{8, 2 * 1024, 0x08004800},
 		{0, 0, 0},
 	};
 

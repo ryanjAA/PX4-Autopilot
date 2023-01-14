@@ -59,15 +59,11 @@
 #define GPIO_USART2_RX_GPIO     (GPIO_INPUT|GPIO_SPEED_50MHz|GPIO_PORTA|GPIO_PIN3)
 #define GPIO_USART2_TX_GPIO     (GPIO_OUTPUT|GPIO_SPEED_50MHz|GPIO_PORTA|GPIO_PIN2)
 
-#define GPIO_USART3_RX_GPIO     (GPIO_INPUT|GPIO_SPEED_50MHz|GPIO_PORTB|GPIO_PIN11)
-#define GPIO_USART3_TX_GPIO     (GPIO_OUTPUT|GPIO_SPEED_50MHz|GPIO_PORTB|GPIO_PIN10)
-
+//#define GPIO_USART3_RX_GPIO     (GPIO_INPUT|GPIO_SPEED_50MHz|GPIO_PORTB|GPIO_PIN11)
+//#define GPIO_USART3_TX_GPIO     (GPIO_OUTPUT|GPIO_SPEED_50MHz|GPIO_PORTB|GPIO_PIN10)
 
 #define GPIO_UART4_RX_GPIO     (GPIO_INPUT|GPIO_SPEED_50MHz|GPIO_PORTC|GPIO_PIN11)
 #define GPIO_UART4_TX_GPIO     (GPIO_OUTPUT|GPIO_SPEED_50MHz|GPIO_PORTC|GPIO_PIN10)
-
-#define GPIO_UART5_RX_GPIO     (GPIO_INPUT|GPIO_SPEED_50MHz|GPIO_PORTD|GPIO_PIN2)
-#define GPIO_UART5_TX_GPIO     (GPIO_OUTPUT|GPIO_SPEED_50MHz|GPIO_PORTC|GPIO_PIN12)
 
 /* High-resolution timer */
 #define HRT_TIMER                    3  /* use timer 3 for the HRT */
@@ -83,23 +79,6 @@ __BEGIN_DECLS
 #ifndef __ASSEMBLY__
 
 extern void stm32_spiinitialize(void);
-
-#include <px4_platform_common/board_common.h>
-
-#endif /* __ASSEMBLY__ */
-/****************************************************************************************************
- * Name: stm32_usbinitialize
- *
- * Description:
- *   Called to configure USB IO.
- *
- ****************************************************************************************************/
-
-#ifndef __ASSEMBLY__
-
-extern void stm32_usbinitialize(void);
-
-//extern void board_peripheral_reset(int ms);
 
 #include <px4_platform_common/board_common.h>
 

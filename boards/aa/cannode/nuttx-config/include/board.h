@@ -152,8 +152,8 @@
 //#define GPIO_USART1_TX	GPIO_USART1_TX /* PA9  */
 //#define GPIO_USART1_RX	GPIO_USART1_RX /* PA10 */
 
-//#define GPIO_USART2_TX	GPIO_USART2_TX /* PA2  */
-//#define GPIO_USART2_RX	GPIO_USART2_RX /* PA3  */
+//#define GPIO_UART4_TX	GPIO_USART4_TX_1 /* PA2  */
+//#define GPIO_UART4_RX	GPIO_USART4_RX_1 /* PA3  */
 
 /* CAN */
 //#define GPIO_CAN1_RX	GPIO_CAN_RX_2    /* PA11 */
