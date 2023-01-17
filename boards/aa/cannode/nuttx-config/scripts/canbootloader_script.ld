@@ -40,7 +40,7 @@
  * where the code expects to begin execution by jumping to the entry point in
  * the 0x0800:0000 address range.
  *
- * The first 0x10000 of flash is reserved for the bootloader.
+ * The first 0x5000 of flash is reserved for the bootloader.
  */
 MEMORY
 {

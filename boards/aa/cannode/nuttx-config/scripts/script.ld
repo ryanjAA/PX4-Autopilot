@@ -40,12 +40,12 @@
  * where the code expects to begin execution by jumping to the entry point in
  * the 0x0800:0000 address range.
  *
- * The first 0x4000 of flash is reserved for the bootloader.
+ * The first 0x5000 of flash is reserved for the bootloader & params.
  */
 
 MEMORY
 {
-    flash (rx)   : ORIGIN = 0x08005000, LENGTH = 492K
+    flash (rx)   : ORIGIN = 0x08008000, LENGTH = 480K
     sram (rwx)   : ORIGIN = 0x20000000, LENGTH = 64K
 }
 
@@ -89,34 +89,35 @@ SECTIONS
 	/*
 	 * Init functions (static constructors and the like)
 	 */
-        .init_section : {
+        .init_section : ALIGN(4) {
                 _sinit = ABSOLUTE(.);
                 KEEP(*(.init_array .init_array.*))
                 _einit = ABSOLUTE(.);
         } > flash
 
 
-	.ARM.extab : {
+	.ARM.extab : ALIGN(4) {
 		*(.ARM.extab*)
 	} > flash
 
 	__exidx_start = ABSOLUTE(.);
-	.ARM.exidx : {
+	.ARM.exidx : ALIGN(4) {
 		*(.ARM.exidx*)
 	} > flash
 	__exidx_end = ABSOLUTE(.);
 
 	_eronly = ABSOLUTE(.);
 
-	.data : {
+	.data : ALIGN(4) {
 		_sdata = ABSOLUTE(.);
 		*(.data .data.*)
 		*(.gnu.linkonce.d.*)
 		CONSTRUCTORS
+		. = ALIGN(4);
 		_edata = ABSOLUTE(.);
 	} > sram AT > flash
 
-	.bss : {
+	.bss : ALIGN(4) {
 		_sbss = ABSOLUTE(.);
 		*(.bss .bss.*)
 		*(.gnu.linkonce.b.*)
