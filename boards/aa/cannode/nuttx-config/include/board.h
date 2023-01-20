@@ -49,7 +49,7 @@
 /* HSI - Internal 8 MHz RC Oscillator
  * LSI - 40 KHz RC
  * HSE - 8 MHz from MCO output of ST-LINK
- * LSE - 32.768 kHz
+ * LSE - N/A
  */
 /* On-board crystal frequency is 8MHz (HSE) */
 
@@ -62,7 +62,6 @@
 #define STM32_HSI_FREQUENCY     8000000ul
 #define STM32_LSI_FREQUENCY     40000            /* Between 30kHz and 60kHz */
 #define STM32_HSE_FREQUENCY     STM32_BOARD_XTAL
-#define STM32_LSE_FREQUENCY     32768
 
 #define STM32_CFGR_PLLSRC       RCC_CFGR_PLLSRC
 #define STM32_CFGR_PLLXTPRE     0

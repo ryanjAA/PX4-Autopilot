@@ -94,25 +94,8 @@ SECTIONS
 	__exidx_end = ABSOLUTE(.);
 
 	_eronly = ABSOLUTE(.);
-/*
-	.data : {
-		_sdata = ABSOLUTE(.);
-		*(.data .data.*)
-		*(.gnu.linkonce.d.*)
-		CONSTRUCTORS
-		_edata = ABSOLUTE(.);
-	} > sram AT > flash
 
-	.bss : {
-		_sbss = ABSOLUTE(.);
-		*(.bss .bss.*)
-		*(.gnu.linkonce.b.*)
-		*(COMMON)
-		. = ALIGN(4);
-		_ebss = ABSOLUTE(.);
-	} > sram
-*/
-    /* The STM32F103Z has 64Kb of SRAM beginning at the following address */
+    /* The STM32F103RE has 64Kb of SRAM beginning at the following address */
 
     .data : ALIGN(4) {
         _sdata = ABSOLUTE(.);
