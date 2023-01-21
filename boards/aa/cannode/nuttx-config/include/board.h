@@ -147,26 +147,6 @@
 */
 /* Alternate function pin selections ************************************************/
 
-/* UARTs */
-//#define GPIO_USART1_TX	GPIO_USART1_TX /* PA9  */
-//#define GPIO_USART1_RX	GPIO_USART1_RX /* PA10 */
-
-//#define GPIO_UART4_TX	GPIO_USART4_TX_1 /* PA2  */
-//#define GPIO_UART4_RX	GPIO_USART4_RX_1 /* PA3  */
-
-/* CAN */
-//#define GPIO_CAN1_RX	GPIO_CAN_RX_2    /* PA11 */
-//#define GPIO_CAN1_TX	GPIO_CAN_TX_2    /* PA12 */
-
-/* I2C */
-//#define GPIO_I2C1_SCL	GPIO_I2C1_SCL_1  /* PB8 */
-//#define GPIO_I2C1_SDA	GPIO_I2C1_SDA_1  /* PB9 */
-
-/* SPI */
-//#define GPIO_SPI1_SCK   GPIO_SPI1_SCK_1  /* PB3 */
-//#define GPIO_SPI1_MISO  GPIO_SPI1_MISO_1 /* PB4 */
-//#define GPIO_SPI1_MOSI  GPIO_SPI1_MOSI_1 /* PB5 */
-
 #define GPIO_I2C1_SCL_GPIO                  (GPIO_OUTPUT | GPIO_OPENDRAIN |GPIO_SPEED_50MHz | GPIO_OUTPUT_SET | GPIO_PORTB | GPIO_PIN8)
 #define GPIO_I2C1_SDA_GPIO                  (GPIO_OUTPUT | GPIO_OPENDRAIN |GPIO_SPEED_50MHz | GPIO_OUTPUT_SET | GPIO_PORTB | GPIO_PIN9)
 

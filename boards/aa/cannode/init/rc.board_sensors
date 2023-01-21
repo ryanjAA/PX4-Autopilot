@@ -2,14 +2,14 @@
 #
 # board sensors init
 #------------------------------------------------------------------------------
-#!/bin/sh
-#
-# board sensors init
-#------------------------------------------------------------------------------
 
-ms5525dso start -X
+
+# GPS
+
+gps start -d /dev/ttyS1 -p ubx
 
 # compasses
+
 qmc5883l -X -q start
 #rm3100 -X -q start
 
@@ -26,11 +26,6 @@ fi
 
 dps310 start -X
 
-
 # TE MS4525DO differential pressure sensor external I2C
 
 ms4525do start -X
-
-# GPS
-
-gps start -d /dev/ttyS1 -p ubx
