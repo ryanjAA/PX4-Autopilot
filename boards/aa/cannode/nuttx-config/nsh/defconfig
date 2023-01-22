@@ -11,6 +11,7 @@
 # CONFIG_NSH_DISABLE_MH is not set
 # CONFIG_NSH_DISABLE_MW is not set
 # CONFIG_NSH_DISABLE_SHUTDOWN is not set
+# CONFIG_STM32_I2C_ALT is not set
 CONFIG_ARCH="arm"
 CONFIG_ARCH_BOARD_CUSTOM=y
 CONFIG_ARCH_BOARD_CUSTOM_DIR="../../../../boards/aa/cannode/nuttx-config"
