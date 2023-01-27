@@ -44,40 +44,45 @@
 #include <px4_platform_common/px4_config.h>
 #include <px4_platform_common/tasks.h>
 
+#include <debug.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <debug.h>
-#include <errno.h>
 
 #include <nuttx/board.h>
 
-#include <stm32.h>
 #include "board_config.h"
-#include "led.h"
+#include <stm32.h>
 #include <stm32_uart.h>
 
 #include <arch/board/board.h>
 
-#include <drivers/drv_hrt.h>
 #include <drivers/drv_board_led.h>
+#include <drivers/drv_hrt.h>
 
 #include <systemlib/px4_macros.h>
 
-#include <px4_platform_common/init.h>
 #include <px4_platform/gpio.h>
+#include <px4_platform_common/init.h>
 
 #if defined(FLASH_BASED_PARAMS)
 #include <parameters/flashparams/flashfs.h>
 #endif
 
+__BEGIN_DECLS
+extern void led_init(void);
+extern void led_on(int led);
+extern void led_off(int led);
+__END_DECLS
+
 /************************************************************************************
  * Name: stm32_boardinitialize
  *
  * Description:
- *   All STM32 architectures must provide the following entry point.  This entry point
- *   is called early in the initialization -- after all memory has been configured
- *   and mapped but before any devices have been initialized.
+ *   All STM32 architectures must provide the following entry point.  This entry
+ *point is called early in the initialization -- after all memory has been
+ *configured and mapped but before any devices have been initialized.
  *
  ************************************************************************************/
 
@@ -142,8 +147,12 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 
 #endif // FLASH_BASED_PARAMS
 
-	//drv_led_start();
-	//led_on(LED_BLUE);
+	drv_led_start();
+	led_off(LED_RED);
+	led_off(LED_BLUE);
+
+	/* No safety LED, however use SAFETY in place of GREEN */
+	led_on(LED_SAFETY);
 
 	/* Configure the HW based on the manifest */
 

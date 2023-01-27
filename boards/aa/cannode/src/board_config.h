@@ -18,8 +18,8 @@
  *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
  * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTAGPIO_CNF_OUTOD BILITY AND
+ *FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
  * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
  * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
  * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
@@ -39,40 +39,50 @@
 
 #pragma once
 
-#include <px4_platform_common/px4_config.h>
 #include <nuttx/compiler.h>
+#include <px4_platform_common/px4_config.h>
 #include <stdint.h>
 
 /* Boot config */
-#define GPIO_BOOT_CONFIG      /* PB6 */ (GPIO_INPUT|GPIO_PORTB|GPIO_PIN6|GPIO_EXTI)
-
-//#define GPIO_CAN1_SILENT_S0  /* PB5  */ (GPIO_OUTPUT|GPIO_SPEED_2MHz|GPIO_OUTPUT_CLEAR|GPIO_PORTB|GPIO_PIN5)
+#define GPIO_BOOT_CONFIG /* PB6 */                                             \
+	(GPIO_INPUT | GPIO_PORTB | GPIO_PIN6 | GPIO_EXTI)
 
 /* LEDs */
-//#define GPIO_LED_BLUE         /* PA4  */ (GPIO_OUTPUT|GPIO_PUSHPULL|GPIO_SPEED_50MHz|GPIO_OUTPUT_CLEAR|GPIO_PORTA|GPIO_PIN4)
-
-//#define GPIO_BTN_SAFETY              (GPIO_INPUT|GPIO_PORTC|GPIO_PIN13)
+#define GPIO_nLED_BLUE /* PA10  */                                             \
+	(GPIO_OUTPUT | GPIO_CNF_OUTPP | GPIO_MODE_2MHz | GPIO_OUTPUT_SET |           \
+	 GPIO_PORTA | GPIO_PIN10 | GPIO_OUTPUT_CLEAR)
+#define GPIO_nLED_GREEN /* PA9  */                                             \
+	(GPIO_OUTPUT | GPIO_CNF_OUTPP | GPIO_MODE_2MHz | GPIO_OUTPUT_SET |           \
+	 GPIO_PORTA | GPIO_PIN9 | GPIO_OUTPUT_CLEAR)
+#define GPIO_nLED_RED /* PA8  */                                               \
+	(GPIO_OUTPUT | GPIO_CNF_OUTPP | GPIO_MODE_2MHz | GPIO_OUTPUT_SET |           \
+	 GPIO_PORTA | GPIO_PIN8 | GPIO_OUTPUT_CLEAR)
 
 #define FLASH_BASED_PARAMS
 #define CONFIG_I2C 1
 
-#define GPIO_USART2_RX_GPIO     (GPIO_INPUT|GPIO_SPEED_50MHz|GPIO_PORTA|GPIO_PIN3)
-#define GPIO_USART2_TX_GPIO     (GPIO_OUTPUT|GPIO_SPEED_50MHz|GPIO_PORTA|GPIO_PIN2)
+#define GPIO_USART2_RX_GPIO                                                    \
+	(GPIO_INPUT | GPIO_SPEED_50MHz | GPIO_PORTA | GPIO_PIN3)
+#define GPIO_USART2_TX_GPIO                                                    \
+	(GPIO_OUTPUT | GPIO_SPEED_50MHz | GPIO_PORTA | GPIO_PIN2)
 
-//#define GPIO_USART3_RX_GPIO     (GPIO_INPUT|GPIO_SPEED_50MHz|GPIO_PORTB|GPIO_PIN11)
-//#define GPIO_USART3_TX_GPIO     (GPIO_OUTPUT|GPIO_SPEED_50MHz|GPIO_PORTB|GPIO_PIN10)
+// #define GPIO_USART3_RX_GPIO
+// (GPIO_INPUT|GPIO_SPEED_50MHz|GPIO_PORTB|GPIO_PIN11) #define
+// GPIO_USART3_TX_GPIO     (GPIO_OUTPUT|GPIO_SPEED_50MHz|GPIO_PORTB|GPIO_PIN10)
 
-#define GPIO_UART4_RX_GPIO     (GPIO_INPUT|GPIO_SPEED_50MHz|GPIO_PORTC|GPIO_PIN11)
-#define GPIO_UART4_TX_GPIO     (GPIO_OUTPUT|GPIO_SPEED_50MHz|GPIO_PORTC|GPIO_PIN10)
+#define GPIO_UART4_RX_GPIO                                                     \
+	(GPIO_INPUT | GPIO_SPEED_50MHz | GPIO_PORTC | GPIO_PIN11)
+#define GPIO_UART4_TX_GPIO                                                     \
+	(GPIO_OUTPUT | GPIO_SPEED_50MHz | GPIO_PORTC | GPIO_PIN10)
 
 /* High-resolution timer */
-#define HRT_TIMER                    3  /* use timer 3 for the HRT */
-#define HRT_TIMER_CHANNEL            4  /* use capture/compare channel 4 */
+#define HRT_TIMER 3         /* use timer 3 for the HRT */
+#define HRT_TIMER_CHANNEL 4 /* use capture/compare channel 4 */
 
-#define PX4_GPIO_INIT_LIST { \
-		GPIO_CAN1_TX,                     \
-		GPIO_CAN1_RX,                     \
-	}
+#define BOARD_HAS_CONTROL_STATUS_LEDS 1
+
+#define PX4_GPIO_INIT_LIST                                                     \
+	{ GPIO_CAN1_TX, GPIO_CAN1_RX, }
 
 __BEGIN_DECLS
 
