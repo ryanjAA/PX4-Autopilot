@@ -1,6 +1,6 @@
-/***************************************************************************
+/****************************************************************************
  *
- *   Copyright (c) 2014 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2023 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,41 +30,24 @@
  * POSSIBILITY OF SUCH DAMAGE.
  *
  ****************************************************************************/
-/**
- * @file loiter.h
- *
- * Helper class to loiter
- *
- * @author Julian Oes <julian@oes.ch>
- */
 
 #pragma once
 
-#include "navigator_mode.h"
-#include "mission_block.h"
+#include "../Common.hpp"
+#include <uORB/Subscription.hpp>
+#include <uORB/topics/open_drone_id_arm_status.h>
 
-#include <px4_platform_common/module_params.h>
-
-class Loiter : public MissionBlock, public ModuleParams
+class OpenDroneIDChecks : public HealthAndArmingCheckBase
 {
 public:
-	Loiter(Navigator *navigator);
-	~Loiter() = default;
+	OpenDroneIDChecks() = default;
+	~OpenDroneIDChecks() = default;
 
-	void on_activation() override;
-	void on_active() override;
+	void checkAndReport(const Context &context, Report &reporter) override;
 
 private:
-	/**
-	 * Use the stored reposition location of the navigator
-	 * to move to a new location.
-	 */
-	void reposition();
-
-	/**
-	 * Set the position to hold based on the current local position
-	 */
-	void set_loiter_position();
-
-
+	DEFINE_PARAMETERS_CUSTOM_PARENT(HealthAndArmingCheckBase,
+					(ParamInt<px4::params::COM_ARM_ODID>) _param_com_arm_odid
+				       )
+	uORB::Subscription _open_drone_id_arm_status_sub{ORB_ID(open_drone_id_arm_status)};
 };

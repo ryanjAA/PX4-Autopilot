@@ -1,6 +1,6 @@
-/***************************************************************************
+/****************************************************************************
  *
- *   Copyright (c) 2014 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2023 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,41 +30,64 @@
  * POSSIBILITY OF SUCH DAMAGE.
  *
  ****************************************************************************/
-/**
- * @file loiter.h
- *
- * Helper class to loiter
- *
- * @author Julian Oes <julian@oes.ch>
- */
 
-#pragma once
+#ifndef OPEN_DRONE_ID_ARM_STATUS_HPP
+#define OPEN_DRONE_ID_ARM_STATUS_HPP
 
-#include "navigator_mode.h"
-#include "mission_block.h"
+#include <uORB/topics/open_drone_id_arm_status.h>
 
-#include <px4_platform_common/module_params.h>
-
-class Loiter : public MissionBlock, public ModuleParams
+class MavlinkStreamOpenDroneIdArmStatus : public MavlinkStream
 {
 public:
-	Loiter(Navigator *navigator);
-	~Loiter() = default;
+	static MavlinkStream *new_instance(Mavlink *mavlink)
+	{
+		return new MavlinkStreamOpenDroneIdArmStatus(mavlink);
+	}
 
-	void on_activation() override;
-	void on_active() override;
+	static constexpr const char *get_name_static()
+	{
+		return "OPEN_DRONE_ID_ARM_STATUS";
+	}
+	static constexpr uint16_t get_id_static()
+	{
+		return MAVLINK_MSG_ID_OPEN_DRONE_ID_ARM_STATUS;
+	}
+
+	const char *get_name() const override { return get_name_static(); }
+	uint16_t get_id() override { return get_id_static(); }
+
+	unsigned get_size() override
+	{
+		return _open_drone_id_arm_status_sub.advertised()
+		       ? MAVLINK_MSG_ID_OPEN_DRONE_ID_ARM_STATUS_LEN +
+		       MAVLINK_NUM_NON_PAYLOAD_BYTES
+		       : 0;
+	}
 
 private:
-	/**
-	 * Use the stored reposition location of the navigator
-	 * to move to a new location.
-	 */
-	void reposition();
+	explicit MavlinkStreamOpenDroneIdArmStatus(Mavlink *mavlink)
+		: MavlinkStream(mavlink) {}
 
-	/**
-	 * Set the position to hold based on the current local position
-	 */
-	void set_loiter_position();
+	uORB::Subscription _open_drone_id_arm_status_sub{ORB_ID(open_drone_id_arm_status)};
 
+	bool send() override
+	{
+		open_drone_id_arm_status_s drone_id_arm;
 
+		if (_open_drone_id_arm_status_sub.update(&drone_id_arm)) {
+
+			mavlink_open_drone_id_arm_status_t msg{};
+
+			msg.status = drone_id_arm.status;
+
+			mavlink_msg_open_drone_id_arm_status_send_struct(_mavlink->get_channel(),
+					&msg);
+
+			return true;
+		}
+
+		return false;
+	}
 };
+
+#endif // OPEN_DRONE_ID_ARM_STATUS_HPP

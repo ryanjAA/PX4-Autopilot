@@ -146,9 +146,9 @@ int px4_platform_init()
 #endif // CONFIG_I2C_RESET
 
 		// send software reset to all
-		uint8_t buf[1] {};
+/*		uint8_t buf[1] {};
 		buf[0] = 0x06; // software reset
-
+THIS IS WHAT WE ADDED - ABOVE AND BELOW
 		i2c_msg_s msg{};
 		msg.frequency = I2C_SPEED_STANDARD;
 		msg.addr = 0x00; // general call address
@@ -158,7 +158,7 @@ int px4_platform_init()
 		I2C_TRANSFER(i2c_dev, &msg, 1);
 
 		px4_i2cbus_uninitialize(i2c_dev);
-	}
+*/	}
 
 #endif // CONFIG_I2C
 
