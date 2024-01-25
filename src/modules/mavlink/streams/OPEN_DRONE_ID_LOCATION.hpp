@@ -167,6 +167,9 @@ private:
 				if (vehicle_gps_position.fix_type >= 2) {
 					msg.latitude = vehicle_gps_position.lat;
 					msg.longitude = vehicle_gps_position.lon;
+					//msg.latitude = static_cast<double>(vehicle_gps_position.lat) * 1e-7;
+					//msg.longitude = static_cast<double>(vehicle_gps_position.lon) * 1e-7;
+
 
 					// altitude_geodetic
 					if (vehicle_gps_position.fix_type >= 3) {
