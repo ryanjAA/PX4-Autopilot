@@ -85,6 +85,7 @@ if(gazebo_FOUND)
 		iris_opt_flow_mockup
 		iris_rplidar
 		iris_vision
+		iris_vps
 		omnicopter
 		plane
 		plane_cam
@@ -96,6 +97,7 @@ if(gazebo_FOUND)
 		rover
 		standard_vtol
 		standard_vtol_drop
+		standard_vtol_vps
 		tailsitter
 		techpod
 		tiltrotor

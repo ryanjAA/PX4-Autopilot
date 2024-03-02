@@ -43,6 +43,7 @@ px4_add_romfs_files(
 	1015_gazebo-classic_iris_obs_avoid.post
 	1017_gazebo-classic_iris_opt_flow_mockup
 	1019_gazebo-classic_iris_dual_gps
+	1020_gazebo-classic_iris_vps
 	1021_gazebo-classic_uuv_hippocampus
 	1022_gazebo-classic_uuv_bluerov2_heavy
 	1030_gazebo-classic_plane
@@ -61,6 +62,7 @@ px4_add_romfs_files(
 	1043_gazebo-classic_standard_vtol_drop
 	1044_gazebo-classic_plane_lidar
 	1045_gazebo-classic_quadtailsitter
+	1046_gazebo-classic_standard_vtol_vps
 	1060_gazebo-classic_rover
 	1061_gazebo-classic_r1_rover
 	1062_flightgear_tf-r1
