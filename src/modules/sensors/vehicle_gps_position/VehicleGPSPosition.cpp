@@ -207,14 +207,11 @@ void VehicleGPSPosition::Run()
 
 	if (state_changed) {
  		if (_vps_state_active) {
- 			PX4_INFO_RAW("[vehicle_gps_position] VPS enabled. Using GPS instance %d.\n", selected);
- 			mavlink_log_warning(&_mavlink_log_pub, "VPS enabled. Using GPS instance %d.", selected);
+ 			mavlink_log_info(&_mavlink_log_pub, "VPS enabled. Using GPS instance %d.", selected);
  		} else {
- 			PX4_INFO_RAW("[vehicle_gps_position] VPS disabled. Using default GPS configurations.\n");
- 			mavlink_log_warning(&_mavlink_log_pub, "VPS disabled. Using default GPS configurations.");
+ 			mavlink_log_info(&_mavlink_log_pub, "VPS disabled. Using default GPS configurations.");
  		}
 
- 		VehicleGPSPosition::PrintStatus();
  	}
 
 
