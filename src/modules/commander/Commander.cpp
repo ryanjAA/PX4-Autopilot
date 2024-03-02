@@ -158,7 +158,7 @@ static int power_button_state_notification_cb(board_power_button_state_notificat
 }
 #endif // BOARD_HAS_POWER_CONTROL
 
-#ifndef CONSTRAINED_FLASH
+//#ifndef CONSTRAINED_FLASH
 static bool send_vehicle_command(const uint32_t cmd, const float param1 = NAN, const float param2 = NAN,
 				 const float param3 = NAN,  const float param4 = NAN, const double param5 = static_cast<double>(NAN),
 				 const double param6 = static_cast<double>(NAN), const float param7 = NAN)
@@ -226,7 +226,7 @@ static bool broadcast_vehicle_command(const uint32_t cmd, const float param1 = N
 	vcmd.timestamp = hrt_absolute_time();
 	return vcmd_pub.publish(vcmd);
 }
-#endif
+//#endif
 
 int Commander::custom_command(int argc, char *argv[])
 {
@@ -235,7 +235,7 @@ int Commander::custom_command(int argc, char *argv[])
 		return 1;
 	}
 
-#ifndef CONSTRAINED_FLASH
+//#ifndef CONSTRAINED_FLASH
 
 	if (!strcmp(argv[0], "calibrate")) {
 		if (argc > 1) {
@@ -466,7 +466,7 @@ int Commander::custom_command(int argc, char *argv[])
 	}
 
 
-#endif
+//#endif
 
 	return print_usage("unknown command");
 }
@@ -2825,7 +2825,7 @@ The commander module contains the state machine for mode switching and failsafe 
 	PRINT_MODULE_USAGE_NAME("commander", "system");
 	PRINT_MODULE_USAGE_COMMAND("start");
 	PRINT_MODULE_USAGE_PARAM_FLAG('h', "Enable HIL mode", true);
-#ifndef CONSTRAINED_FLASH
+//#ifndef CONSTRAINED_FLASH
 	PRINT_MODULE_USAGE_COMMAND_DESCR("calibrate", "Run sensor calibration");
 	PRINT_MODULE_USAGE_ARG("mag|baro|accel|gyro|level|esc|airspeed", "Calibration type", false);
 	PRINT_MODULE_USAGE_ARG("quick", "Quick calibration (accel only, not recommended)", false);
@@ -2838,7 +2838,7 @@ The commander module contains the state machine for mode switching and failsafe 
 	PRINT_MODULE_USAGE_COMMAND("land");
 	PRINT_MODULE_USAGE_COMMAND_DESCR("transition", "VTOL transition");
 	PRINT_MODULE_USAGE_COMMAND_DESCR("mode", "Change flight mode");
-	PRINT_MODULE_USAGE_ARG("manual|acro|offboard|stabilized|altctl|posctl|auto:mission|auto:loiter|auto:rtl|auto:takeoff|auto:land|auto:precland",
+	PRINT_MODULE_USAGE_ARG("manual|acro|offboard|stabilized|altctl|posctl|vps|auto:mission|auto:loiter|auto:rtl|auto:takeoff|auto:land|auto:precland",
 			"Flight mode", false);
 	PRINT_MODULE_USAGE_COMMAND("pair");
 	PRINT_MODULE_USAGE_COMMAND("lockdown");
@@ -2847,7 +2847,7 @@ The commander module contains the state machine for mode switching and failsafe 
 	PRINT_MODULE_USAGE_ARG("lat, lon, alt", "Origin Latitude, Longitude, Altitude", false);
 	PRINT_MODULE_USAGE_COMMAND_DESCR("lat|lon|alt", "Origin latitude longitude altitude");
 	PRINT_MODULE_USAGE_COMMAND_DESCR("poweroff", "Power off board (if supported)");
-#endif
+//#endif
 	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
 
 	return 1;

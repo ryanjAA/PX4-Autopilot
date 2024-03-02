@@ -66,7 +66,7 @@
 #include <uORB/topics/sensor_gps.h>
 #include <uORB/topics/sensor_gnss_relative.h>
 
-#ifndef CONSTRAINED_FLASH
+//#ifndef CONSTRAINED_FLASH
 # include "devices/src/ashtech.h"
 # include "devices/src/emlid_reach.h"
 # include "devices/src/mtk.h"
@@ -74,7 +74,7 @@
 # include "devices/src/nmea.h"
 # include "devices/src/sbf.h"
 
-#endif // CONSTRAINED_FLASH
+//#endif // CONSTRAINED_FLASH
 #include "devices/src/ubx.h"
 
 #ifdef __PX4_LINUX
@@ -342,7 +342,7 @@ GPS::GPS(const char *path, gps_driver_mode_t mode, GPSHelper::Interface interfac
 
 		switch (protocol) {
 		case 1: _mode = gps_driver_mode_t::UBX; break;
-#ifndef CONSTRAINED_FLASH
+//#ifndef CONSTRAINED_FLASH
 
 		case 2: _mode = gps_driver_mode_t::MTK; break;
 
@@ -355,7 +355,7 @@ GPS::GPS(const char *path, gps_driver_mode_t mode, GPSHelper::Interface interfac
 		case 6: _mode = gps_driver_mode_t::NMEA; break;
 
 		case 7: _mode = gps_driver_mode_t::SBF; break;
-#endif // CONSTRAINED_FLASH
+//#endif // CONSTRAINED_FLASH
 		}
 	}
 
@@ -880,7 +880,7 @@ GPS::run()
 						   gps_ubx_dynmodel, heading_offset, f9p_uart2_baudrate, ubx_mode);
 			set_device_type(DRV_GPS_DEVTYPE_UBX);
 			break;
-#ifndef CONSTRAINED_FLASH
+//#ifndef CONSTRAINED_FLASH
 
 		case gps_driver_mode_t::MTK:
 			_helper = new GPSDriverMTK(&GPS::callback, this, &_report_gps_pos);
@@ -911,7 +911,7 @@ GPS::run()
 			_helper = new GPSDriverSBF(&GPS::callback, this, &_report_gps_pos, _p_report_sat_info, heading_offset, pitch_offset);
 			set_device_type(DRV_GPS_DEVTYPE_SBF);
 			break;
-#endif // CONSTRAINED_FLASH
+//#endif // CONSTRAINED_FLASH
 
 		default:
 			break;
@@ -1064,7 +1064,7 @@ GPS::run()
 		if (_mode_auto) {
 			switch (_mode) {
 			case gps_driver_mode_t::UBX:
-#ifndef CONSTRAINED_FLASH
+//#ifndef CONSTRAINED_FLASH
 				_mode = gps_driver_mode_t::MTK;
 				break;
 
@@ -1086,7 +1086,7 @@ GPS::run()
 
 			case gps_driver_mode_t::SBF:
 			case gps_driver_mode_t::NMEA: // skip NMEA for auto-detection to avoid false positive matching
-#endif // CONSTRAINED_FLASH
+//#endif // CONSTRAINED_FLASH
 				_mode = gps_driver_mode_t::UBX;
 				px4_usleep(500000); // tried all possible drivers. Wait a bit before next round
 				break;
@@ -1125,7 +1125,7 @@ GPS::print_status()
 	case gps_driver_mode_t::UBX:
 		PX4_INFO("protocol: UBX");
 		break;
-#ifndef CONSTRAINED_FLASH
+//#ifndef CONSTRAINED_FLASH
 
 	case gps_driver_mode_t::MTK:
 		PX4_INFO("protocol: MTK");
@@ -1149,7 +1149,7 @@ GPS::print_status()
 
 	case gps_driver_mode_t::SBF:
 		PX4_INFO("protocol: SBF");
-#endif // CONSTRAINED_FLASH
+//#endif // CONSTRAINED_FLASH
 
 	default:
 		break;
@@ -1505,7 +1505,7 @@ GPS *GPS::instantiate(int argc, char *argv[], Instance instance)
 		case 'p':
 			if (!strcmp(myoptarg, "ubx")) {
 				mode = gps_driver_mode_t::UBX;
-#ifndef CONSTRAINED_FLASH
+//#ifndef CONSTRAINED_FLASH
 			} else if (!strcmp(myoptarg, "mtk")) {
 				mode = gps_driver_mode_t::MTK;
 
@@ -1523,7 +1523,7 @@ GPS *GPS::instantiate(int argc, char *argv[], Instance instance)
 
 			} else if (!strcmp(myoptarg, "sbf")) {
 				mode = gps_driver_mode_t::SBF;
-#endif // CONSTRAINED_FLASH
+//#endif // CONSTRAINED_FLASH
 			} else {
 				PX4_ERR("unknown protocol: %s", myoptarg);
 				error_flag = true;
