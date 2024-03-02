@@ -92,6 +92,7 @@ public:
 		}
 	}
 	int getSelectedGps() const { return _selected_gps; }
+	void setSelectedGps(int selected_gps) { _selected_gps = selected_gps; }
 
 private:
 	/*

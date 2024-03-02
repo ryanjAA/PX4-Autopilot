@@ -107,6 +107,7 @@ void VehicleGPSPosition::Run()
 	// Check all GPS instance
 	bool any_gps_updated = false;
 	bool gps_updated = false;
+	bool state_changed = false;
 
     // Index of selected GPS module (secondary instance)
  	uint8_t const selected = 1;
@@ -114,7 +115,8 @@ void VehicleGPSPosition::Run()
  		vehicle_status_s vehicle_status;
 
  	if (_vehicle_status_sub.updated() && _vehicle_status_sub.update(&vehicle_status)) {
- 		_vps_state_active = (vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_UNUSED2);
+		state_changed = (vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_VPS) && !_vps_state_active;
+ 		_vps_state_active = (vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_VPS);
  	}
 
  	if (_vps_state_active) {
@@ -124,15 +126,17 @@ void VehicleGPSPosition::Run()
 		gps_updated = _sensor_gps_sub[selected].updated();
 
  		_sensor_gps_sub[selected].copy(&gps_data);
- 		_gps_blending.setGpsData(gps_data, selected);
- 		_gps_blending.setPrimaryInstance(selected);
+		// _gps_blending.setGpsData(gps_data, selected);
+ 		// _gps_blending.setPrimaryInstance(selected);
+ 		_gps_blending.setSelectedGps(selected);
 
  		if (!_sensor_gps_sub[selected].registered()) {
  			_sensor_gps_sub[selected].registerCallback();
  		}
 
 		if (gps_updated) {
-            _vehicle_gps_position_pub.publish(gps_data);
+			gps_data.device_id = selected;
+ 			_vehicle_gps_position_pub.publish(gps_data);
  		}
 
  	} else {
@@ -169,6 +173,12 @@ void VehicleGPSPosition::Run()
              }
 		}
 	}
+
+	if (state_changed) {
+ 		PX4_INFO_RAW("[vehicle_gps_position] VPS enabled\n");
+ 		VehicleGPSPosition::PrintStatus();
+ 	}
+
 
 	ScheduleDelayed(300_ms); // backup schedule
 
