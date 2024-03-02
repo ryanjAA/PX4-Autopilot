@@ -102,41 +102,71 @@ void VehicleGPSPosition::ParametersUpdate(bool force)
 void VehicleGPSPosition::Run()
 {
 	perf_begin(_cycle_perf);
-	ParametersUpdate();
+	ParametersUpdate(_vps_state_active);
 
 	// Check all GPS instance
 	bool any_gps_updated = false;
 	bool gps_updated = false;
 
-	for (uint8_t i = 0; i < GPS_MAX_RECEIVERS; i++) {
-		gps_updated = _sensor_gps_sub[i].updated();
+    // Index of selected GPS module (secondary instance)
+ 	uint8_t const selected = 1;
+
+ 		vehicle_status_s vehicle_status;
+
+ 	if (_vehicle_status_sub.updated() && _vehicle_status_sub.update(&vehicle_status)) {
+ 		_vps_state_active = (vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_UNUSED2);
+ 	}
+
+ 	if (_vps_state_active) {
 
 		sensor_gps_s gps_data;
 
+		gps_updated = _sensor_gps_sub[selected].updated();
+
+ 		_sensor_gps_sub[selected].copy(&gps_data);
+ 		_gps_blending.setGpsData(gps_data, selected);
+ 		_gps_blending.setPrimaryInstance(selected);
+
+ 		if (!_sensor_gps_sub[selected].registered()) {
+ 			_sensor_gps_sub[selected].registerCallback();
+ 		}
+
 		if (gps_updated) {
-			any_gps_updated = true;
+            _vehicle_gps_position_pub.publish(gps_data);
+ 		}
+
+ 	} else {
+ 		for (uint8_t i = 0; i < GPS_MAX_RECEIVERS; i++) {
+ 			gps_updated = _sensor_gps_sub[i].updated();
+
+ 			sensor_gps_s gps_data;
+
+			if (gps_updated) {
+ 				any_gps_updated = true;
 
 			_sensor_gps_sub[i].copy(&gps_data);
-			_gps_blending.setGpsData(gps_data, i);
+ 				_gps_blending.setGpsData(gps_data, i);
 
-			if (!_sensor_gps_sub[i].registered()) {
-				_sensor_gps_sub[i].registerCallback();
+ 				if (!_sensor_gps_sub[i].registered()) {
+ 					_sensor_gps_sub[i].registerCallback();
+ 				}
 			}
 		}
-	}
+	
 
-	if (any_gps_updated) {
-		_gps_blending.update(hrt_absolute_time());
+		if (any_gps_updated) {
+ 			_gps_blending.update(hrt_absolute_time());
 
-		if (_gps_blending.isNewOutputDataAvailable()) {
-			sensor_gps_s gps_output{_gps_blending.getOutputGpsData()};
+			if (_gps_blending.isNewOutputDataAvailable()) {
+                 sensor_gps_s gps_output{_gps_blending.getOutputGpsData()};
 
 			// clear device_id if blending
-			if (_gps_blending.getSelectedGps() == GpsBlending::GPS_MAX_RECEIVERS_BLEND) {
-				gps_output.device_id = 0;
-			}
+                 if (_gps_blending.getSelectedGps() == GpsBlending::GPS_MAX_RECEIVERS_BLEND) {
+                     gps_output.device_id = 0;
+                 }
 
 			_vehicle_gps_position_pub.publish(gps_output);
+             }
 		}
 	}
 

@@ -45,6 +45,7 @@
 #include <uORB/SubscriptionCallback.hpp>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/sensor_gps.h>
+#include <uORB/topics/vehicle_status.h>
 
 #include "gps_blending.hpp"
 
@@ -69,6 +70,9 @@ private:
 
 	void ParametersUpdate(bool force = false);
 
+	  // defines the vps state
+    bool _vps_state_active = false;
+
 	// defines used to specify the mask position for use of different accuracy metrics in the GPS blending algorithm
 	static constexpr uint8_t BLEND_MASK_USE_SPD_ACC  = 1;
 	static constexpr uint8_t BLEND_MASK_USE_HPOS_ACC = 2;
@@ -80,6 +84,8 @@ private:
 		      "GPS_MAX_RECEIVERS must match to GPS_MAX_RECEIVERS_BLEND");
 
 	uORB::Publication<sensor_gps_s> _vehicle_gps_position_pub{ORB_ID(vehicle_gps_position)};
+
+	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
 
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
