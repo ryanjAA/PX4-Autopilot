@@ -36,6 +36,7 @@
 #include <px4_platform_common/log.h>
 #include <lib/geo/geo.h>
 #include <lib/mathlib/mathlib.h>
+#include <systemlib/mavlink_log.h>
 
 namespace sensors
 {
@@ -107,6 +108,9 @@ void VehicleGPSPosition::Run()
 	// Check all GPS instance
 	bool any_gps_updated = false;
 	bool gps_updated = false;
+
+ 	// GPS switch vars
+ 	bool _vps_state_active_tmp = _vps_state_active;
 	bool state_changed = false;
 
     // Index of selected GPS module (secondary instance)
@@ -115,8 +119,36 @@ void VehicleGPSPosition::Run()
  		vehicle_status_s vehicle_status;
 
  	if (_vehicle_status_sub.updated() && _vehicle_status_sub.update(&vehicle_status)) {
-		state_changed = (vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_VPS) && !_vps_state_active;
- 		_vps_state_active = (vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_VPS);
+
+ 		// change GPS selected instance based on the navigation mode
+ 		switch(vehicle_status.nav_state){
+ 			case vehicle_status_s::NAVIGATION_STATE_VPS:
+ 				_vps_state_active_tmp = true;
+ 				break;
+
+ 			case vehicle_status_s::NAVIGATION_STATE_POSCTL:
+ 			case vehicle_status_s::NAVIGATION_STATE_ALTCTL:
+ 			case vehicle_status_s::NAVIGATION_STATE_STAB:
+ 			case vehicle_status_s::NAVIGATION_STATE_MANUAL:
+ 			case vehicle_status_s::NAVIGATION_STATE_ACRO:
+ 			case vehicle_status_s::NAVIGATION_STATE_AUTO_RTL:
+ 			case vehicle_status_s::NAVIGATION_STATE_TERMINATION:
+ 				_vps_state_active_tmp = false;
+ 				break;
+
+ 			default:
+ 				_vps_state_active_tmp = _vps_state_active;
+ 				break;
+ 		}
+
+ 		// See if state changed
+ 		if (_vps_state_active_tmp != _vps_state_active) {
+ 			_vps_state_active = _vps_state_active_tmp;
+ 			state_changed = true;
+ 		}
+ 		else {
+ 			state_changed = false;
+ 		}
  	}
 
  	if (_vps_state_active) {
@@ -126,8 +158,7 @@ void VehicleGPSPosition::Run()
 		gps_updated = _sensor_gps_sub[selected].updated();
 
  		_sensor_gps_sub[selected].copy(&gps_data);
-		// _gps_blending.setGpsData(gps_data, selected);
- 		// _gps_blending.setPrimaryInstance(selected);
+
  		_gps_blending.setSelectedGps(selected);
 
  		if (!_sensor_gps_sub[selected].registered()) {
@@ -164,18 +195,25 @@ void VehicleGPSPosition::Run()
 			if (_gps_blending.isNewOutputDataAvailable()) {
                  sensor_gps_s gps_output{_gps_blending.getOutputGpsData()};
 
-			// clear device_id if blending
-                 if (_gps_blending.getSelectedGps() == GpsBlending::GPS_MAX_RECEIVERS_BLEND) {
-                     gps_output.device_id = 0;
-                 }
-
+				// clear device_id if blending
+ 				if (_gps_blending.getSelectedGps() == GpsBlending::GPS_MAX_RECEIVERS_BLEND) {
+ 					gps_output.device_id = 0;
+ 				}
+ 				
 			_vehicle_gps_position_pub.publish(gps_output);
-             }
+ 			}
 		}
 	}
 
 	if (state_changed) {
- 		PX4_INFO_RAW("[vehicle_gps_position] VPS enabled\n");
+ 		if (_vps_state_active) {
+ 			PX4_INFO_RAW("[vehicle_gps_position] VPS enabled. Using GPS instance %d.\n", selected);
+ 			mavlink_log_warning(&_mavlink_log_pub, "VPS enabled. Using GPS instance %d.", selected);
+ 		} else {
+ 			PX4_INFO_RAW("[vehicle_gps_position] VPS disabled. Using default GPS configurations.\n");
+ 			mavlink_log_warning(&_mavlink_log_pub, "VPS disabled. Using default GPS configurations.");
+ 		}
+
  		VehicleGPSPosition::PrintStatus();
  	}
 

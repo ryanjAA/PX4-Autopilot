@@ -70,8 +70,11 @@ private:
 
 	void ParametersUpdate(bool force = false);
 
-	  // defines the vps state
-    bool _vps_state_active = false;
+    	// defines the vps state
+     	bool _vps_state_active = false;
+
+     	// orb advertiser
+ 	orb_advert_t _mavlink_log_pub{nullptr};
 
 	// defines used to specify the mask position for use of different accuracy metrics in the GPS blending algorithm
 	static constexpr uint8_t BLEND_MASK_USE_SPD_ACC  = 1;
