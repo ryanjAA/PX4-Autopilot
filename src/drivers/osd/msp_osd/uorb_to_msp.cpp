@@ -102,8 +102,8 @@ msp_name_t construct_display_message(const vehicle_status_s &vehicle_status,
 			display.set(MessageDisplayType::FLIGHT_MODE, "AUTO_RTL");
 			break;
 
-		case vehicle_status_s::NAVIGATION_STATE_UNUSED:
-			display.set(MessageDisplayType::FLIGHT_MODE, "UNUSED");
+		case vehicle_status_s::NAVIGATION_STATE_VPS:
+ 			display.set(MessageDisplayType::FLIGHT_MODE, "VPS");
 			break;
 
 		case vehicle_status_s::NAVIGATION_STATE_ACRO:

@@ -532,6 +532,7 @@ int8_t ManualControl::navStateFromParam(int32_t param_value)
 		case 6: return vehicle_status_s::NAVIGATION_STATE_ACRO;
 		case 7: return vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
 		case 8: return vehicle_status_s::NAVIGATION_STATE_STAB;
+		case 9: return vehicle_status_s::NAVIGATION_STATE_VPS;
 		case 10: return vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF;
 		case 11: return vehicle_status_s::NAVIGATION_STATE_AUTO_LAND;
 		case 12: return vehicle_status_s::NAVIGATION_STATE_AUTO_FOLLOW_TARGET;

@@ -69,6 +69,7 @@ void getVehicleControlMode(bool armed, uint8_t nav_state, uint8_t vehicle_type,
 		vehicle_control_mode.flag_control_climb_rate_enabled = true;
 		break;
 
+	case vehicle_status_s::NAVIGATION_STATE_VPS:
 	case vehicle_status_s::NAVIGATION_STATE_POSCTL:
 		vehicle_control_mode.flag_control_manual_enabled = true;
 		vehicle_control_mode.flag_control_rates_enabled = true;

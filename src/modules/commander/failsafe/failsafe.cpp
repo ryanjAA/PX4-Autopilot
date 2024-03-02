@@ -496,6 +496,13 @@ FailsafeBase::Action Failsafe::checkModeFallback(const failsafe_flags_s &status_
 	switch (position_control_navigation_loss_response(_param_com_posctl_navl.get())) {
 	case position_control_navigation_loss_response::Altitude_Manual: // AltCtrl/Manual
 
+		// VPS -> AltCtrl
+ 		if (user_intended_mode == vehicle_status_s::NAVIGATION_STATE_VPS
+ 		    && !modeCanRun(status_flags, user_intended_mode)) {
+ 			action = Action::FallbackAltCtrl;
+ 			user_intended_mode = vehicle_status_s::NAVIGATION_STATE_ALTCTL;
+ 		}
+
 		// PosCtrl -> AltCtrl
 		if (user_intended_mode == vehicle_status_s::NAVIGATION_STATE_POSCTL
 		    && !modeCanRun(status_flags, user_intended_mode)) {
@@ -527,6 +534,19 @@ FailsafeBase::Action Failsafe::checkModeFallback(const failsafe_flags_s &status_
 			}
 		}
 
+		// VPS -> Land
+ 		if (user_intended_mode == vehicle_status_s::NAVIGATION_STATE_VPS
+ 		    && !modeCanRun(status_flags, user_intended_mode)) {
+ 			action = Action::Land;
+ 			user_intended_mode = vehicle_status_s::NAVIGATION_STATE_AUTO_LAND;
+
+ 			// Land -> Descend
+ 			if (!modeCanRun(status_flags, user_intended_mode)) {
+ 				action = Action::Descend;
+ 				user_intended_mode = vehicle_status_s::NAVIGATION_STATE_DESCEND;
+ 			}
+ 		}
+ 		
 		break;
 	}
 

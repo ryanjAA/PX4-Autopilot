@@ -391,6 +391,10 @@ OSDatxxxx::get_flight_mode(uint8_t nav_state)
 		flight_mode = "POSITION";
 		break;
 
+	case vehicle_status_s::NAVIGATION_STATE_VPS:
+ 		flight_mode = "VPS";
+ 		break;
+
 	case vehicle_status_s::NAVIGATION_STATE_AUTO_RTL:
 		flight_mode = "RETURN";
 		break;
