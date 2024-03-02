@@ -82,5 +82,5 @@ param set-default SENS_GPS_MASK 0
 param set-default SENS_GPS_PRIME 0
 param set-default EKF2_GPS_CHECK 0
 param set-default EKF2_GPS_CTRL 3
-param set-default EKF2_GPS_DELAY 0.11
+param set-default EKF2_GPS_DELAY 110
 param set-default EKF2_GPS_P_NOISE 0.1
