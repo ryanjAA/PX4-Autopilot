@@ -45,7 +45,7 @@
 class FakeGps : public ModuleBase<FakeGps>, public ModuleParams, public px4::ScheduledWorkItem
 {
 public:
-	FakeGps(double latitude_deg = 29.6603018, double longitude_deg = -82.3160500, float altitude_m = 30.1f);
+	FakeGps(double latitude_deg = 47.397742, double longitude_deg = 8.5457, float altitude_m = 488.002f);
 
 	~FakeGps() override = default;
 
