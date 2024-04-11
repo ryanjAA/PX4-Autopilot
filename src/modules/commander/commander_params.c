@@ -1004,18 +1004,14 @@ PARAM_DEFINE_INT32(COM_ARM_SDCARD, 1);
 PARAM_DEFINE_INT32(COM_ARM_HFLT_CHK, 1);
 
 /**
-  * Enable Drone ID system detection and health check
+  * Remote ID
   *
-  * This check detects if the Open Drone ID system is missing.
-  * Depending on the value of the parameter, the check can be
-  * disabled, warn only or deny arming.
-  *
+  * For US aircraft this is no longer changeable.
+  * 
   * @group Commander
-  * @value 0 Disabled
-  * @value 1 Warning only
-  * @value 2 Enforce Open Drone ID system presence
+  * @value 2 Enabled
   */
- PARAM_DEFINE_INT32(COM_ARM_ODID, 0);
+ PARAM_DEFINE_INT32(COM_ARM_ODID, 2);
 
 /**
  * Enforced delay between arming and further navigation
