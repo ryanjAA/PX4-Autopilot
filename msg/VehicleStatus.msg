@@ -83,8 +83,11 @@ uint8 VEHICLE_TYPE_FIXED_WING = 2
 uint8 VEHICLE_TYPE_ROVER = 3
 uint8 VEHICLE_TYPE_AIRSHIP = 4
 
+
 bool failsafe # true if system is in failsafe state (e.g.:RTL, Hover, Terminate, ...)
 bool failsafe_and_user_took_over # true if system is in failsafe state but the user took over control
+
+bool emergency_declared # true if user manually declared an emergency via GCS
 
 # Link loss
 bool gcs_connection_lost              # datalink to GCS lost
