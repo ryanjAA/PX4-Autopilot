@@ -1119,6 +1119,14 @@ Commander::handle_command(const vehicle_command_s &cmd)
 
 		break;
 
+
+ 	case vehicle_command_s::VEHICLE_CMD_DO_SET_EMERGENCY: {
+ 		const int param1 = cmd.param1;
+ 		_vehicle_status.emergency_declared = (bool) param1;
+ 		cmd_result = vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED;
+ 	}
+ 		break;
+ 		
 	case vehicle_command_s::VEHICLE_CMD_ACTUATOR_TEST:
 		cmd_result = handleCommandActuatorTest(cmd);
 		break;
@@ -2595,8 +2603,8 @@ void Commander::dataLinkCheck()
 					_open_drone_id_system_lost = false;
 
 					if (_datalink_last_heartbeat_open_drone_id_system != 0) {
-						mavlink_log_info(&_mavlink_log_pub, "OpenDroneID system regained\t");
-						events::send(events::ID("commander_open_drone_id_regained"), events::Log::Info, "OpenDroneID system regained");
+						mavlink_log_info(&_mavlink_log_pub, "Remote ID system regained\t");
+						events::send(events::ID("commander_open_drone_id_regained"), events::Log::Info, "Remote ID system regained");
 					}
 				}
 
@@ -2660,8 +2668,8 @@ void Commander::dataLinkCheck()
 	// OpenDroneID system
 	if ((hrt_elapsed_time(&_datalink_last_heartbeat_open_drone_id_system) > 3_s)
 	    && !_open_drone_id_system_lost) {
-		mavlink_log_critical(&_mavlink_log_pub, "OpenDroneID system lost");
-		events::send(events::ID("commander_open_drone_id_lost"), events::Log::Critical, "OpenDroneID system lost");
+		mavlink_log_critical(&_mavlink_log_pub, "Remote ID system lost");
+		events::send(events::ID("commander_open_drone_id_lost"), events::Log::Critical, "Remote ID system lost");
 		_vehicle_status.open_drone_id_system_present = false;
 		_vehicle_status.open_drone_id_system_healthy = false;
 		_open_drone_id_system_lost = true;
