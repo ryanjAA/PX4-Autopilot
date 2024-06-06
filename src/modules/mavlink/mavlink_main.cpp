@@ -1411,15 +1411,12 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		//configure_stream_local("GPS_RAW_INT", 1.0f);
 		configure_stream_local("GPS_RAW_INT", 5.0f);
 		configure_stream_local("GPS_STATUS", 1.0f);
-		//configure_stream_local("HOME_POSITION", 0.5f);
 		configure_stream_local("HOME_POSITION", 2.5f);
 		configure_stream_local("HYGROMETER_SENSOR", 0.1f);
 		configure_stream_local("LOCAL_POSITION_NED", 1.0f);
 		configure_stream_local("NAV_CONTROLLER_OUTPUT", 1.0f);
 		configure_stream_local("OBSTACLE_DISTANCE", 1.0f);
-		configure_stream_local("OPEN_DRONE_ID_ARM_STATUS", 3.f);
-		//configure_stream_local("OPEN_DRONE_ID_LOCATION", 1.f);
-		//configure_stream_local("OPEN_DRONE_ID_SYSTEM", 1.f);
+		configure_stream_local("OPEN_DRONE_ID_ARM_STATUS", 1.f);
 		configure_stream_local("OPEN_DRONE_ID_LOCATION", 3.f);
 		configure_stream_local("OPEN_DRONE_ID_SYSTEM", 3.f);
 		configure_stream_local("ORBIT_EXECUTION_STATUS", 2.0f);
@@ -1482,7 +1479,7 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		configure_stream_local("HOME_POSITION", 0.5f);
 		configure_stream_local("HYGROMETER_SENSOR", 1.0f);
 		configure_stream_local("NAV_CONTROLLER_OUTPUT", 10.0f);
-		//configure_stream_local("OPEN_DRONE_ID_ARM_STATUS", 3.0f);  //this was just a test right after it was working - remove if not on here
+		configure_stream_local("OPEN_DRONE_ID_ARM_STATUS", 1.0f);
 		configure_stream_local("OPEN_DRONE_ID_LOCATION", 1.f);
 		configure_stream_local("OPEN_DRONE_ID_SYSTEM", 1.f);
 		configure_stream_local("OPTICAL_FLOW_RAD", 10.0f);
@@ -1610,7 +1607,6 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		configure_stream_local("DISTANCE_SENSOR", 10.0f);
 		configure_stream_local("MOUNT_ORIENTATION", 10.0f);
 		configure_stream_local("ODOMETRY", 30.0f);
-		configure_stream_local("OPEN_DRONE_ID_ARM_STATUS", 3.0f);
 		configure_stream_local("ADSB_VEHICLE", unlimited_rate);
 		configure_stream_local("ALTITUDE", 10.0f);
 		configure_stream_local("ATTITUDE", 50.0f);
@@ -1630,15 +1626,12 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		configure_stream_local("GPS_RAW_INT", unlimited_rate);
 		configure_stream_local("GPS_STATUS", 1.0f);
 		configure_stream_local("HIGHRES_IMU", 50.0f);
-		//configure_stream_local("HOME_POSITION", 0.5f);
 		configure_stream_local("HOME_POSITION", 2.5f);
 		configure_stream_local("HYGROMETER_SENSOR", 1.0f);
 		configure_stream_local("MAG_CAL_REPORT", 1.0f);
 		configure_stream_local("MANUAL_CONTROL", 5.0f);
 		configure_stream_local("NAV_CONTROLLER_OUTPUT", 10.0f);
-		//configure_stream_local("OPEN_DRONE_ID_LOCATION", 1.f);
-		//configure_stream_local("OPEN_DRONE_ID_SYSTEM", 1.f);
-		configure_stream_local("OPEN_DRONE_ID_ARM_STATUS", 3.f);
+		configure_stream_local("OPEN_DRONE_ID_ARM_STATUS", 1.f);
 		configure_stream_local("OPEN_DRONE_ID_LOCATION", 3.f);
 		configure_stream_local("OPEN_DRONE_ID_SYSTEM", 3.f);
 		configure_stream_local("OPTICAL_FLOW_RAD", 10.0f);
