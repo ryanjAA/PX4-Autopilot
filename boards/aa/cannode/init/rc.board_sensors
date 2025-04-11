@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# board sensors init
+#------------------------------------------------------------------------------
+
+
+# GPS
+
+gps start -d /dev/ttyS1 -p ubx
+
+# compasses
+
+qmc5883l -X -q start
+#rm3100 -X -q start
+
+# Mag bias estimator
+if param compare -s MBE_ENABLE 1
+then
+	# conservative mag bias estimation
+	param set-default MBE_LEARN_GAIN 5
+	param set-default IMU_GYRO_CUTOFF 20
+	mag_bias_estimator start
+fi
+
+# start baro
+
+dps310 start -X
+
+# TE MS4525DO differential pressure sensor external I2C
+
+ms4525do start -X

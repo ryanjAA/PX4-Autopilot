@@ -16,6 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         config: [
+          aa_cannode,
           airmind_mindpx-v2,
           ark_can-flow,
           ark_can-gps,
