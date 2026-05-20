@@ -68,7 +68,8 @@ private:
 
 			if (_sensor_hygrometer_subs[i].update(&sensor_hygrometer)) {
 				mavlink_hygrometer_sensor_t msg{};
-				msg.id          = i; // uint8_t Hygrometer ID
+				//msg.id          = i; // uint8_t Hygrometer ID
+				msg.id          =(sensor_hygrometer.device_id >> 8) & 0xFF; //AA custom - I2c address byte instead of instance index
 				msg.temperature = roundf(sensor_hygrometer.temperature * 100.f); // degrees to centidegrees (int16_t)
 				msg.humidity    = roundf(sensor_hygrometer.humidity);            // % (uint16_t)
 
