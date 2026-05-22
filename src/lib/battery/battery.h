@@ -91,6 +91,7 @@ public:
 	void setStateOfCharge(const float soc) { _state_of_charge = soc; _external_state_of_charge = true; }
 	void updateVoltage(const float voltage_v);
 	void updateCurrent(const float current_a);
+	void updateTemperature(const float temperature_c);
 
 	/**
 	 * Update state of charge calculations
@@ -169,6 +170,7 @@ private:
 	AlphaFilter<float> _current_filter_a;
 	AlphaFilter<float> _current_average_filter_a;
 	AlphaFilter<float> _throttle_filter;
+	float _temperature_c{NAN};
 	float _discharged_mah{0.f};
 	float _discharged_mah_loop{0.f};
 	float _state_of_charge_volt_based{-1.f}; // [0,1]

@@ -55,8 +55,6 @@ INA238::INA238(const I2CSPIDriverConfig &config, int battery_index) :
 		_max_current = fvalue;
 	}
 
-	_range = _max_current > (DEFAULT_MAX_CURRENT - 1.0f) ? INA238_ADCRANGE_HIGH : INA238_ADCRANGE_LOW;
-
 	fvalue = DEFAULT_SHUNT;
 	_rshunt = fvalue;
 	ph = param_find("INA238_SHUNT");
@@ -65,13 +63,26 @@ INA238::INA238(const I2CSPIDriverConfig &config, int battery_index) :
 		_rshunt = fvalue;
 	}
 
+	const float v_sense_max = _rshunt * _max_current;
+	_range = (v_sense_max > INA238_ADCRANGE_LOW_V_SENSE) ? INA238_ADCRANGE_HIGH : INA238_ADCRANGE_LOW;
+
 	_current_lsb = _max_current / INA238_DN_MAX;
+	_shunt_calibration = static_cast<uint16_t>(INA238_CONST * _current_lsb * _rshunt);
+
+	if (_range == INA238_ADCRANGE_LOW) {
+		_shunt_calibration *= 4;
+	}
+
+	_register_cfg[0].set_bits = static_cast<uint16_t>(_range);
+	_register_cfg[0].clear_bits = (_range == INA238_ADCRANGE_HIGH) ? INA238_ADCRANGE_MASK : 0;
+	_register_cfg[2].set_bits = _shunt_calibration;
+	_register_cfg[2].clear_bits = static_cast<uint16_t>(~_shunt_calibration);
 
 	// We need to publish immediately, to guarantee that the first instance of the driver publishes to uORB instance 0
-	_battery.setConnected(false);
-	_battery.updateVoltage(0.f);
-	_battery.updateCurrent(0.f);
+	setConnected(false);
 	_battery.updateAndPublishBatteryStatus(hrt_absolute_time());
+
+	I2C::_retries = 5;
 }
 
 INA238::~INA238()
@@ -80,6 +91,7 @@ INA238::~INA238()
 	perf_free(_sample_perf);
 	perf_free(_comms_errors);
 	perf_free(_collection_errors);
+	perf_free(_bad_register_perf);
 }
 
 int INA238::read(uint8_t address, uint16_t &data)
@@ -114,33 +126,17 @@ int INA238::init()
 		return ret;
 	}
 
-	if (write(INA238_REG_CONFIG, (uint16_t)(INA238_RST_RESET | _range)) != PX4_OK) {
+	ret = Reset();
+
+	if (ret != PX4_OK) {
 		return ret;
 	}
-
-	uint16_t shunt_calibration = static_cast<uint16_t>(INA238_CONST * _current_lsb * _rshunt);
-
-	if (_range == INA238_ADCRANGE_LOW) {
-		shunt_calibration *= 4;
-	}
-
-	if (write(INA238_REG_SHUNTCAL, shunt_calibration) < 0) {
-		return -3;
-	}
-
-	// Set the CONFIG for max I
-	if (write(INA238_REG_CONFIG, (uint16_t) _range) != PX4_OK) {
-		return ret;
-	}
-
-	// Start ADC continous mode here
-	ret = write(INA238_REG_ADCCONFIG, (uint16_t)INA238_ADCCONFIG);
 
 	start();
 	_sensor_ok = true;
+	_initialized = true;
 
-	_initialized = ret == PX4_OK;
-	return ret;
+	return PX4_OK;
 }
 
 int INA238::force_init()
@@ -156,12 +152,12 @@ int INA238::probe()
 {
 	uint16_t value{0};
 
-	if (read(INA238_MANUFACTURER_ID, value) != PX4_OK || value != INA238_MFG_ID_TI) {
+	if (RegisterRead(INA238_MANUFACTURER_ID, value) != PX4_OK || value != INA238_MFG_ID_TI) {
 		PX4_DEBUG("probe mfgid %d", value);
 		return -1;
 	}
 
-	if (read(INA238_DEVICE_ID, value) != PX4_OK || (
+	if (RegisterRead(INA238_DEVICE_ID, value) != PX4_OK || (
 		    INA238_DEVICEID(value) != INA238_MFG_DIE
 	    )) {
 		PX4_DEBUG("probe die id %d", value);
@@ -171,6 +167,60 @@ int INA238::probe()
 	return PX4_OK;
 }
 
+int INA238::Reset()
+{
+	int ret = PX4_ERROR;
+	_reset_required = false;
+
+	if (RegisterWrite(INA238_REG_CONFIG, INA238_RST_RESET) != PX4_OK) {
+		return ret;
+	}
+
+	if (RegisterWrite(INA238_REG_SHUNTCAL, _shunt_calibration) != PX4_OK) {
+		return -3;
+	}
+
+	if (RegisterWrite(INA238_REG_CONFIG, static_cast<uint16_t>(_range)) != PX4_OK) {
+		return ret;
+	}
+
+	ret = RegisterWrite(INA238_REG_ADCCONFIG, INA238_ADCCONFIG);
+
+	return ret;
+}
+
+bool INA238::RegisterCheck(const register_config_t &reg_cfg)
+{
+	uint16_t reg_value{0};
+
+	if (RegisterRead(reg_cfg.reg, reg_value) != PX4_OK) {
+		return false;
+	}
+
+	if (reg_cfg.set_bits && ((reg_value & reg_cfg.set_bits) != reg_cfg.set_bits)) {
+		PX4_DEBUG("0x%02x: 0x%04x (0x%04x not set)", static_cast<unsigned>(reg_cfg.reg),
+			  static_cast<unsigned>(reg_value), static_cast<unsigned>(reg_cfg.set_bits));
+		return false;
+	}
+
+	if (reg_cfg.clear_bits && ((reg_value & reg_cfg.clear_bits) != 0)) {
+		PX4_DEBUG("0x%02x: 0x%04x (0x%04x not cleared)", static_cast<unsigned>(reg_cfg.reg),
+			  static_cast<unsigned>(reg_value), static_cast<unsigned>(reg_cfg.clear_bits));
+		return false;
+	}
+
+	return true;
+}
+
+int INA238::RegisterWrite(uint8_t reg, uint16_t value)
+{
+	return write(reg, value);
+}
+
+int INA238::RegisterRead(uint8_t reg, uint16_t &value)
+{
+	return read(reg, value);
+}
 
 int INA238::collect()
 {
@@ -189,18 +239,31 @@ int INA238::collect()
 	bool success{true};
 	int16_t bus_voltage{0};
 	int16_t current{0};
+	int16_t temperature{0};
 
-	success = success && (read(INA238_REG_VSBUS, bus_voltage) == PX4_OK);
-	success = success && (read(INA238_REG_CURRENT, current) == PX4_OK);
+	success = (RegisterRead(INA238_REG_VSBUS, (uint16_t &)bus_voltage) == PX4_OK);
+	success = success && (RegisterRead(INA238_REG_CURRENT, (uint16_t &)current) == PX4_OK);
+	success = success && (RegisterRead(INA238_REG_DIETEMP, (uint16_t &)temperature) == PX4_OK);
 
-	if (!success) {
-		PX4_DEBUG("error reading from sensor");
-		bus_voltage = current = 0;
+	if (success && hrt_elapsed_time(&_last_config_check_timestamp) > 100_ms) {
+		if (RegisterCheck(_register_cfg[_checked_register])) {
+			_last_config_check_timestamp = hrt_absolute_time();
+			_checked_register = (_checked_register + 1) % size_register_cfg;
+
+		} else {
+			PX4_DEBUG("register check failed");
+			perf_count(_bad_register_perf);
+			success = false;
+			_reset_required = true;
+		}
 	}
 
-	_battery.setConnected(success);
-	_battery.updateVoltage(static_cast<float>(bus_voltage * INA238_VSCALE));
-	_battery.updateCurrent(static_cast<float>(current * _current_lsb));
+	if (setConnected(success)) {
+		_battery.updateVoltage(static_cast<float>(bus_voltage * INA238_VSCALE));
+		_battery.updateCurrent(static_cast<float>(current * _current_lsb));
+		_battery.updateTemperature(static_cast<float>(temperature * INA238_TSCALE));
+	}
+
 	_battery.updateAndPublishBatteryStatus(hrt_absolute_time());
 
 	perf_end(_sample_perf);
@@ -209,6 +272,7 @@ int INA238::collect()
 		return PX4_OK;
 
 	} else {
+		PX4_DEBUG("error reading from sensor");
 		return PX4_ERROR;
 	}
 }
@@ -234,7 +298,15 @@ void INA238::RunImpl()
 			if (collect() != PX4_OK) {
 				perf_count(_collection_errors);
 				/* if error restart the measurement state machine */
-				start();
+				if (_reset_required) {
+					ScheduleClear();
+					_initialized = false;
+					ScheduleNow();
+
+				} else {
+					start();
+				}
+
 				return;
 			}
 
@@ -255,15 +327,34 @@ void INA238::RunImpl()
 		ScheduleDelayed(INA238_CONVERSION_INTERVAL);
 
 	} else {
-		_battery.setConnected(false);
-		_battery.updateVoltage(0.f);
-		_battery.updateCurrent(0.f);
+		setConnected(false);
 		_battery.updateAndPublishBatteryStatus(hrt_absolute_time());
 
 		if (init() != PX4_OK) {
 			ScheduleDelayed(INA238_INIT_RETRY_INTERVAL_US);
 		}
 	}
+}
+
+bool INA238::setConnected(bool state)
+{
+	const hrt_abstime now = hrt_absolute_time();
+
+	if (state) {
+		_connected_until = now + 2_s;
+	}
+
+	if (now < _connected_until) {
+		_battery.setConnected(true);
+
+	} else {
+		_battery.setConnected(false);
+		_battery.updateVoltage(0.f);
+		_battery.updateCurrent(0.f);
+		_battery.updateTemperature(0.f);
+	}
+
+	return state;
 }
 
 void INA238::print_status()

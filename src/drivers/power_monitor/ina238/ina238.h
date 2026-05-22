@@ -282,6 +282,8 @@ using namespace time_literals;
 #define INA238_DN_MAX                        32768.0f   /* 2^15 */
 #define INA238_CONST                         819.2e6f  /* is an internal fixed value used to ensure scaling is maintained properly  */
 #define INA238_VSCALE                        3.125e-03f  /* LSB of voltage is 3.1255 mV/LSB */
+#define INA238_TSCALE                        7.8125e-03f /* LSB of temperature is 7.8125 mDegC/LSB */
+#define INA238_ADCRANGE_LOW_V_SENSE          0.04096f // ± 40.96 mV
 
 
 #define DEFAULT_MAX_CURRENT                  327.68f    /* Amps */
@@ -321,23 +323,51 @@ protected:
 	int probe() override;
 
 private:
+	struct register_config_t {
+		uint8_t reg;
+		uint16_t set_bits{0};
+		uint16_t clear_bits{0};
+	};
+
+	bool RegisterCheck(const register_config_t &reg_cfg);
+	int RegisterWrite(uint8_t reg, uint16_t value);
+	int RegisterRead(uint8_t reg, uint16_t &value);
+	int Reset();
+
 	bool _sensor_ok{false};
 	unsigned int _measure_interval{0};
 	bool _collect_phase{false};
 	bool _initialized{false};
+	bool _reset_required{false};
 
 	perf_counter_t _sample_perf;
 	perf_counter_t _comms_errors;
 	perf_counter_t _collection_errors;
+	perf_counter_t _bad_register_perf{perf_alloc(PC_COUNT, MODULE_NAME": bad register")};
 
 	// Configuration state, computed from params
 	float _max_current;
 	float _rshunt;
 	float _current_lsb;
 	int16_t _range;
+	uint16_t _shunt_calibration{0};
+
+	hrt_abstime _last_config_check_timestamp{0};
+	uint8_t _checked_register{0};
+	static constexpr uint8_t size_register_cfg{3};
+	register_config_t _register_cfg[size_register_cfg] {
+		// Register | Set bits, Clear bits
+		{ INA238_REG_CONFIG, 0, 0}, // range bits are set dynamically
+		{ INA238_REG_ADCCONFIG, INA238_ADCCONFIG, 0},
+		{ INA238_REG_SHUNTCAL, 0, 0} // calibration bits are set dynamically
+	};
 
 	Battery _battery;
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
+	hrt_abstime _connected_until{0};
+
+	// returns state unchanged
+	bool setConnected(bool state);
 
 	int read(uint8_t address, uint16_t &data);
 	int write(uint8_t address, uint16_t data);
