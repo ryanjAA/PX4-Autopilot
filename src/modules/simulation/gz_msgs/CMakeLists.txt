@@ -31,3 +31,11 @@ if (Protobuf_FOUND)
     # Export the binary dir for other modules
     set(PX4_GZ_MSGS_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR} CACHE INTERNAL "")
 endif()
+
+if(TARGET px4_gz_msgs)
+	target_compile_features(px4_gz_msgs PUBLIC cxx_std_17)
+endif()
+
+if(TARGET px4_gz_msgs)
+	target_compile_options(px4_gz_msgs PRIVATE -Wno-error)
+endif()

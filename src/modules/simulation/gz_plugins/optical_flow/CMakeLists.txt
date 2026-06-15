@@ -63,3 +63,7 @@ target_include_directories(${PROJECT_NAME}
 )
 
 add_dependencies(${PROJECT_NAME} OpticalFlow)
+
+if(TARGET OpticalFlowSystem)
+	target_compile_options(OpticalFlowSystem PRIVATE -Wno-error)
+endif()
