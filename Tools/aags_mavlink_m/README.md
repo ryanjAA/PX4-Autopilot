@@ -51,11 +51,22 @@ field release.
 A valid cue from the configured link and sender is checked for:
 
 - MAVLink 2 message ID, generated layout, length, and CRC;
-- exact header sender and matching nonzero `origin_sysid`;
+- exact configured packet sender and a nonzero sensing-platform `origin_sysid`;
 - nonzero cue ID and immutable payload for that ID;
 - UTC timestamp age/future bounds;
 - WGS84 bounds, finite/NaN rules, confidence range, cue intent, and enum range;
 - a bounded two-item inbox and an eight-item durable replay/terminal cache.
+
+Packet sender identity and sensing-platform identity are kept separate. The
+configured `MAV_M_SRC_SYS`/`MAV_M_SRC_CMP` identify the AAGS component that
+encoded the packet. `TARGET_CUE.origin_sysid` identifies the sensing platform
+described by the canonical field and may differ when AAGS relays a contact.
+
+The approved `TRACK_IDENTITY` workflow message is accepted from that same
+configured packet source. A fresh, nonzero `target_set_id` can bind its stable
+track UUID to a cue carrying the same target-set and sensing-origin values. The
+identity enriches display/audit state only; it cannot authorize navigation or
+engagement. A target-set collision with a different UUID is ignored.
 
 `RECEIVED` is sent only after an atomic, CRC-protected state commit to
 `PX4_STORAGEDIR/mavlink_m_state.bin`. The persisted record is bound to the
@@ -143,8 +154,13 @@ Configure `MAV_M_MODE=1` at the PX4 prompt. The default SITL instance 0 listens
 on UDP 18570 and sends to UDP 14550. In another terminal:
 
 ```sh
+Tools/aags_mavlink_m/endpoint_tool.py track \
+  --target-set 45 --origin-system 1 \
+  --track-uid 00112233-4455-6677-8899-aabbccddeeff
+
 Tools/aags_mavlink_m/endpoint_tool.py cue \
-  --instance 731 --lat 45.4671 --lon -73.7578 --alt 50 \
+  --instance 731 --target-set 45 --origin-system 1 \
+  --lat 45.4671 --lon -73.7578 --alt 50 \
   --name "training cue"
 ```
 

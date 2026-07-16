@@ -74,8 +74,10 @@ private:
 	struct Assignment {
 		uint64_t time_usec{0};
 		uint64_t valid_until_usec{0};
+		uint64_t track_identity_time_usec{0};
 		uint32_t message_id{0};
 		uint32_t instance_id{0};
+		uint32_t target_set_id{0};
 		uint32_t payload_crc{0};
 		int32_t lat{0};
 		int32_t lon{0};
@@ -86,6 +88,7 @@ private:
 		float confidence{NAN};
 		uint8_t source_system{0};
 		uint8_t source_component{0};
+		uint8_t origin_system{0};
 		uint8_t target_class{0};
 		uint8_t target_force{0};
 		uint8_t cue_type{0};
@@ -94,6 +97,17 @@ private:
 		AssignmentState state{AssignmentState::Empty};
 		uint8_t last_ack_result{0}; // MAVLINK_M_ACK_RECEIVED
 		uint8_t restored{0};
+	};
+
+	struct TrackIdentity {
+		uint64_t time_usec{0};
+		uint64_t first_detected_usec{0};
+		uint32_t target_set_id{0};
+		float confidence{NAN};
+		uint8_t source_system{0};
+		uint8_t source_component{0};
+		uint8_t origin_system{0};
+		uint8_t track_uid[16]{};
 	};
 
 	struct PersistedState {
@@ -112,13 +126,15 @@ private:
 	};
 
 	static constexpr uint32_t PersistenceMagic = 0x4d534741; // "AGSM"
-	static constexpr uint16_t PersistenceVersion = 2;
+	static constexpr uint16_t PersistenceVersion = 3;
 	static constexpr unsigned InboxCapacity = 2;
 	static constexpr unsigned TerminalCapacity = 8;
+	static constexpr unsigned TrackIdentityCapacity = 4;
 	static constexpr hrt_abstime SourceFreshTimeout = 15'000'000;
 
 	bool enabled() const;
 	bool source_matches(const mavlink_message_t &message) const;
+	void handle_track_identity(const mavlink_message_t &message);
 	void handle_target_cue(const mavlink_message_t &message);
 	void handle_target_handover(const mavlink_message_t &message);
 	void store_assignment(const Assignment &assignment);
@@ -128,10 +144,13 @@ private:
 			   uint8_t *ack_result) const;
 
 	Assignment *find_duplicate(const Assignment &candidate);
+	const TrackIdentity *find_track_identity(const Assignment &assignment) const;
+	void apply_track_identity(Assignment &assignment, const TrackIdentity &identity);
 	Assignment *find_pending();
 	Assignment *find_free_inbox();
 	void remove_inbox(Assignment *assignment);
 	void remember_terminal(const Assignment &assignment, AssignmentState state, uint8_t result);
+	void undo_remember_terminal(const Assignment &evicted);
 	void promote_queued();
 	void expire_assignments(uint64_t now_usec);
 
@@ -155,6 +174,7 @@ private:
 	Assignment _active{};
 	Assignment _inbox[InboxCapacity]{};
 	Assignment _terminal[TerminalCapacity]{};
+	TrackIdentity _track_identities[TrackIdentityCapacity]{};
 	RcPosition _last_rc_position{RcPosition::Unknown};
 	bool _rc_center_latched{false};
 	bool _state_loaded{false};

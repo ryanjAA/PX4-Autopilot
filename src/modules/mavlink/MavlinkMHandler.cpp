@@ -88,6 +88,17 @@ bool valid_target_force(uint8_t target_force)
 	       || target_force == MAVLINK_M_TARGET_FORCE_EXTRATERRESTRIAL;
 }
 
+bool all_zero(const uint8_t *bytes, size_t length)
+{
+	for (size_t i = 0; i < length; ++i) {
+		if (bytes[i] != 0) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 } // namespace
 
 MavlinkMHandler::MavlinkMHandler(Mavlink *mavlink) :
@@ -132,6 +143,10 @@ void MavlinkMHandler::update_parameters()
 			assignment = Assignment{};
 		}
 
+		for (TrackIdentity &identity : _track_identities) {
+			identity = TrackIdentity{};
+		}
+
 		_state_loaded = false;
 		_source_last_seen = 0;
 		_last_rc_position = RcPosition::Unknown;
@@ -160,7 +175,8 @@ void MavlinkMHandler::handle_message(const mavlink_message_t &message)
 		return;
 	}
 
-	if (message.msgid != MAVLINK_MSG_ID_TARGET_CUE
+	if (message.msgid != MAVLINK_MSG_ID_TRACK_IDENTITY
+	    && message.msgid != MAVLINK_MSG_ID_TARGET_CUE
 	    && message.msgid != MAVLINK_MSG_ID_TARGET_HANDOVER) {
 		return;
 	}
@@ -174,11 +190,128 @@ void MavlinkMHandler::handle_message(const mavlink_message_t &message)
 		_warned_unaddressed = true;
 	}
 
-	if (message.msgid == MAVLINK_MSG_ID_TARGET_CUE) {
+	if (message.msgid == MAVLINK_MSG_ID_TRACK_IDENTITY) {
+		handle_track_identity(message);
+
+	} else if (message.msgid == MAVLINK_MSG_ID_TARGET_CUE) {
 		handle_target_cue(message);
 
 	} else {
 		handle_target_handover(message);
+	}
+}
+
+void MavlinkMHandler::handle_track_identity(const mavlink_message_t &message)
+{
+	mavlink_track_identity_t track{};
+	mavlink_msg_track_identity_decode(&message, &track);
+
+	const uint64_t now_usec = utc_now_usec();
+	const uint64_t tolerance_usec = _max_age_s > 0
+					? static_cast<uint64_t>(_max_age_s) * 1'000'000ULL : 0;
+
+	// A zero target-set is explicitly valid on the wire, but the current cue
+	// has no track_uid and therefore offers no safe correlation key.
+	if (track.target_set_id == 0) {
+		return;
+	}
+
+	if (track.origin_sysid == 0 || all_zero(track.track_uid, sizeof(track.track_uid))
+	    || track.time_usec < Unix2020Usec || track.first_detected_usec < Unix2020Usec
+	    || track.first_detected_usec > track.time_usec
+	    || now_usec < Unix2020Usec
+	    || (tolerance_usec > 0 && (track.time_usec > now_usec + tolerance_usec
+					 || now_usec > track.time_usec + tolerance_usec))
+	    || (!std::isnan(track.id_confidence)
+		&& (!PX4_ISFINITE(track.id_confidence) || track.id_confidence < 0.f || track.id_confidence > 1.f))
+	    || !valid_target_class(track.target_class) || !valid_target_force(track.target_force)
+	    || track.origin_sensor >= MAVLINK_M_ID_METHOD_ENUM_END
+	    || track.id_method >= MAVLINK_M_ID_METHOD_ENUM_END
+	    || track.pid_status >= MAVLINK_M_PID_STATUS_ENUM_END
+	    || track.track_rel >= MAVLINK_M_TRACK_REL_ENUM_END
+	    || track.external_track_type >= MAVLINK_M_TRACK_NUMBER_TYPE_ENUM_END
+	    || track.stanag_identity >= MAVLINK_M_STANAG_IDENTITY_ENUM_END
+	    || track.environment >= MAVLINK_M_ENVIRONMENT_ENUM_END
+	    || (track.atr_confidence_pct > 100 && track.atr_confidence_pct != 255)
+	    || track.atr_conf_tier >= MAVLINK_M_ATR_CONFIDENCE_ENUM_END
+	    || track.sidc_context >= MAVLINK_M_SIDC_CONTEXT_ENUM_END) {
+		PX4_WARN("ignoring invalid MAVLink-M track identity");
+		return;
+	}
+
+	TrackIdentity identity{};
+	identity.time_usec = track.time_usec;
+	identity.first_detected_usec = track.first_detected_usec;
+	identity.target_set_id = track.target_set_id;
+	identity.confidence = track.id_confidence;
+	identity.source_system = message.sysid;
+	identity.source_component = message.compid;
+	identity.origin_system = track.origin_sysid;
+	memcpy(identity.track_uid, track.track_uid, sizeof(identity.track_uid));
+
+	TrackIdentity *slot = nullptr;
+	TrackIdentity *oldest = &_track_identities[0];
+
+	for (TrackIdentity &stored : _track_identities) {
+		if (stored.target_set_id == identity.target_set_id
+		    && stored.source_system == identity.source_system
+		    && stored.source_component == identity.source_component) {
+			if (memcmp(stored.track_uid, identity.track_uid, sizeof(identity.track_uid)) != 0) {
+				PX4_WARN("MAVLink-M target-set identity collision");
+				return;
+			}
+
+			if (identity.time_usec < stored.time_usec) {
+				return;
+			}
+
+			slot = &stored;
+			break;
+		}
+
+		if (stored.target_set_id == 0 && slot == nullptr) {
+			slot = &stored;
+		}
+
+		if (stored.time_usec < oldest->time_usec) {
+			oldest = &stored;
+		}
+	}
+
+	if (slot == nullptr) {
+		slot = oldest;
+	}
+
+	*slot = identity;
+
+	const Assignment active_before = _active;
+	const Assignment inbox_before[InboxCapacity] {_inbox[0], _inbox[1]};
+	bool changed = false;
+
+	auto enrich = [this, &identity, &changed](Assignment &assignment) {
+		if (assignment.state != AssignmentState::Empty
+		    && assignment.target_set_id == identity.target_set_id
+		    && assignment.source_system == identity.source_system
+		    && assignment.source_component == identity.source_component
+		    && assignment.origin_system == identity.origin_system
+		    && (all_zero(assignment.track_uid, sizeof(assignment.track_uid))
+			|| memcmp(assignment.track_uid, identity.track_uid, sizeof(identity.track_uid)) == 0)) {
+			apply_track_identity(assignment, identity);
+			changed = true;
+		}
+	};
+
+	enrich(_active);
+
+	for (Assignment &assignment : _inbox) {
+		enrich(assignment);
+	}
+
+	if (changed && !save_state()) {
+		_active = active_before;
+		_inbox[0] = inbox_before[0];
+		_inbox[1] = inbox_before[1];
+		PX4_WARN("MAVLink-M track enrichment was not persisted");
 	}
 }
 
@@ -196,6 +329,7 @@ void MavlinkMHandler::handle_target_cue(const mavlink_message_t &message)
 
 	assignment.message_id = MAVLINK_MSG_ID_TARGET_CUE;
 	assignment.instance_id = cue.cue_id;
+	assignment.target_set_id = cue.target_set_id;
 	assignment.payload_crc = crc32_signature(0, message.len,
 			reinterpret_cast<const uint8_t *>(message.payload64));
 	assignment.lat = cue.lat;
@@ -207,14 +341,15 @@ void MavlinkMHandler::handle_target_cue(const mavlink_message_t &message)
 	assignment.confidence = cue.confidence_score;
 	assignment.source_system = message.sysid;
 	assignment.source_component = message.compid;
+	assignment.origin_system = cue.origin_sysid;
 	assignment.target_class = cue.target_class;
 	assignment.target_force = cue.target_force;
 	assignment.cue_type = cue.cue_type;
 	memcpy(assignment.name, cue.name, sizeof(cue.name));
 	assignment.name[sizeof(assignment.name) - 1] = '\0';
 
-	if (cue.origin_sysid == 0 || cue.origin_sysid != message.sysid) {
-		send_ack(assignment, MAVLINK_M_ACK_FAILED, "cue origin/header mismatch");
+	if (cue.origin_sysid == 0) {
+		send_ack(assignment, MAVLINK_M_ACK_FAILED, "cue origin system invalid");
 		return;
 	}
 
@@ -228,6 +363,10 @@ void MavlinkMHandler::handle_target_cue(const mavlink_message_t &message)
 	if (!valid_target_class(assignment.target_class) || !valid_target_force(assignment.target_force)) {
 		send_ack(assignment, MAVLINK_M_ACK_FAILED, "invalid classification enum");
 		return;
+	}
+
+	if (const TrackIdentity *identity = find_track_identity(assignment)) {
+		apply_track_identity(assignment, *identity);
 	}
 
 	store_assignment(assignment);
@@ -360,6 +499,30 @@ MavlinkMHandler::Assignment *MavlinkMHandler::find_duplicate(const Assignment &c
 	return nullptr;
 }
 
+const MavlinkMHandler::TrackIdentity *MavlinkMHandler::find_track_identity(const Assignment &assignment) const
+{
+	if (assignment.target_set_id == 0) {
+		return nullptr;
+	}
+
+	for (const TrackIdentity &identity : _track_identities) {
+		if (identity.target_set_id == assignment.target_set_id
+		    && identity.source_system == assignment.source_system
+		    && identity.source_component == assignment.source_component
+		    && identity.origin_system == assignment.origin_system) {
+			return &identity;
+		}
+	}
+
+	return nullptr;
+}
+
+void MavlinkMHandler::apply_track_identity(Assignment &assignment, const TrackIdentity &identity)
+{
+	assignment.track_identity_time_usec = identity.time_usec;
+	memcpy(assignment.track_uid, identity.track_uid, sizeof(assignment.track_uid));
+}
+
 MavlinkMHandler::Assignment *MavlinkMHandler::find_pending()
 {
 	for (Assignment &assignment : _inbox) {
@@ -448,6 +611,15 @@ void MavlinkMHandler::remember_terminal(const Assignment &assignment, Assignment
 	_terminal[0].last_ack_result = result;
 }
 
+void MavlinkMHandler::undo_remember_terminal(const Assignment &evicted)
+{
+	for (unsigned i = 0; i + 1 < TerminalCapacity; ++i) {
+		_terminal[i] = _terminal[i + 1];
+	}
+
+	_terminal[TerminalCapacity - 1] = evicted;
+}
+
 void MavlinkMHandler::promote_queued()
 {
 	if (_active.state != AssignmentState::Empty) {
@@ -514,15 +686,14 @@ void MavlinkMHandler::reject_pending_or_abort_active()
 	if (pending != nullptr) {
 		const Assignment decided = *pending;
 		const Assignment inbox_before[2] {_inbox[0], _inbox[1]};
-		Assignment terminal_before[TerminalCapacity] {};
-		memcpy(terminal_before, _terminal, sizeof(_terminal));
+		const Assignment terminal_evicted = _terminal[TerminalCapacity - 1];
 		remove_inbox(pending);
 		remember_terminal(decided, AssignmentState::Rejected, MAVLINK_M_ACK_REJECTED);
 
 		if (!save_state()) {
 			_inbox[0] = inbox_before[0];
 			_inbox[1] = inbox_before[1];
-			memcpy(_terminal, terminal_before, sizeof(_terminal));
+			undo_remember_terminal(terminal_evicted);
 			send_ack(decided, MAVLINK_M_ACK_FAILED, "decision storage failed");
 			return;
 		}
@@ -536,8 +707,7 @@ void MavlinkMHandler::reject_pending_or_abort_active()
 		const Assignment decided = _active;
 		const Assignment active_before = _active;
 		const Assignment inbox_before[2] {_inbox[0], _inbox[1]};
-		Assignment terminal_before[TerminalCapacity] {};
-		memcpy(terminal_before, _terminal, sizeof(_terminal));
+		const Assignment terminal_evicted = _terminal[TerminalCapacity - 1];
 		_active = Assignment{};
 		remember_terminal(decided, AssignmentState::Aborted, MAVLINK_M_ACK_REJECTED);
 		promote_queued();
@@ -546,7 +716,7 @@ void MavlinkMHandler::reject_pending_or_abort_active()
 			_active = active_before;
 			_inbox[0] = inbox_before[0];
 			_inbox[1] = inbox_before[1];
-			memcpy(_terminal, terminal_before, sizeof(_terminal));
+			undo_remember_terminal(terminal_evicted);
 			send_ack(decided, MAVLINK_M_ACK_FAILED, "abort storage failed");
 			return;
 		}
@@ -625,16 +795,16 @@ void MavlinkMHandler::expire_assignments(uint64_t now_usec)
 
 	bool changed = false;
 	Assignment expired_assignments[3] {};
+	Assignment terminal_evicted[3] {};
 	unsigned expired_count = 0;
 	const Assignment active_before = _active;
 	const Assignment inbox_before[2] {_inbox[0], _inbox[1]};
-	Assignment terminal_before[TerminalCapacity] {};
-	memcpy(terminal_before, _terminal, sizeof(_terminal));
 
 	if (_active.state == AssignmentState::Active && _active.valid_until_usec != 0
 	    && now_usec > _active.valid_until_usec) {
 		const Assignment expired = _active;
 		_active = Assignment{};
+		terminal_evicted[expired_count] = _terminal[TerminalCapacity - 1];
 		remember_terminal(expired, AssignmentState::Expired, MAVLINK_M_ACK_EXPIRED);
 		expired_assignments[expired_count++] = expired;
 		changed = true;
@@ -645,6 +815,7 @@ void MavlinkMHandler::expire_assignments(uint64_t now_usec)
 		    && now_usec > _inbox[i].valid_until_usec) {
 			const Assignment expired = _inbox[i];
 			remove_inbox(&_inbox[i]);
+			terminal_evicted[expired_count] = _terminal[TerminalCapacity - 1];
 			remember_terminal(expired, AssignmentState::Expired, MAVLINK_M_ACK_EXPIRED);
 			expired_assignments[expired_count++] = expired;
 			changed = true;
@@ -661,7 +832,10 @@ void MavlinkMHandler::expire_assignments(uint64_t now_usec)
 			_active = active_before;
 			_inbox[0] = inbox_before[0];
 			_inbox[1] = inbox_before[1];
-			memcpy(_terminal, terminal_before, sizeof(_terminal));
+
+			for (unsigned i = expired_count; i > 0; --i) {
+				undo_remember_terminal(terminal_evicted[i - 1]);
+			}
 
 		} else {
 			for (unsigned i = 0; i < expired_count; ++i) {
@@ -777,10 +951,13 @@ void MavlinkMHandler::publish_status()
 
 	if (display != nullptr) {
 		status.assignment_time_usec = display->time_usec;
+		status.track_identity_time_usec = display->track_identity_time_usec;
 		status.message_id = display->message_id;
 		status.instance_id = display->instance_id;
+		status.target_set_id = display->target_set_id;
 		status.source_system = display->source_system;
 		status.source_component = display->source_component;
+		status.origin_system = display->origin_system;
 		status.target_class = display->target_class;
 		status.target_force = display->target_force;
 		status.prompt = display->state == AssignmentState::Pending;
@@ -816,6 +993,8 @@ void MavlinkMHandler::publish_status()
 				status.relative_bearing_deg = wrap_180(status.bearing_deg - yaw_deg);
 			}
 		}
+
+		status.track_identity_valid = !all_zero(display->track_uid, sizeof(display->track_uid));
 	}
 
 	_status_pub.publish(status);

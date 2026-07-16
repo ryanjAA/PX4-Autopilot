@@ -211,6 +211,7 @@ def default_instance() -> int:
 
 def send_cue(endpoint: Endpoint, args) -> tuple[int, int]:
     instance = args.instance or default_instance()
+    origin_system = args.origin_system or args.source_system
     message = endpoint.mav.target_cue_encode(
         int(time.time() * 1_000_000),
         instance,
@@ -222,7 +223,7 @@ def send_cue(endpoint: Endpoint, args) -> tuple[int, int]:
         math.nan,
         math.nan,
         args.confidence,
-        args.origin_system,
+        origin_system,
         args.cue_type,
         args.target_class,
         args.target_force,
@@ -231,6 +232,41 @@ def send_cue(endpoint: Endpoint, args) -> tuple[int, int]:
     endpoint.mav.send(message)
     print(f"sent TARGET_CUE instance={instance}")
     return endpoint.dialect.MAVLINK_MSG_ID_TARGET_CUE, instance
+
+
+def send_track_identity(endpoint: Endpoint, args) -> None:
+    now_usec = int(time.time() * 1_000_000)
+    track_uid = uuid.UUID(args.track_uid).bytes if args.track_uid else uuid.uuid4().bytes
+    origin_system = args.origin_system or args.source_system
+    message = endpoint.mav.track_identity_encode(
+        now_usec,
+        track_uid,
+        bytes(16),
+        args.target_set,
+        now_usec - round(args.track_age * 1_000_000),
+        args.confidence,
+        origin_system,
+        args.id_method,
+        args.id_method,
+        args.pid_status,
+        0,
+        args.target_class,
+        args.target_force,
+        fixed_text(args.id_basis, 50),
+        fixed_text("", 20),
+        0,
+        args.stanag_identity,
+        args.environment,
+        255,
+        0,
+        0,
+        args.sidc_context,
+    )
+    endpoint.mav.send(message)
+    print(
+        f"sent TRACK_IDENTITY target_set_id={args.target_set} "
+        f"track_uid={uuid.UUID(bytes=track_uid)} origin_system={origin_system}; no ACK is defined"
+    )
 
 
 def send_handover(endpoint: Endpoint, args) -> tuple[int, int]:
@@ -297,9 +333,29 @@ def build_parser() -> argparse.ArgumentParser:
     cue = commands.add_parser("cue", help="send a non-kinetic TARGET_CUE")
     add_target_arguments(cue, require_alt=False)
     cue.add_argument("--target-set", type=int, default=0)
-    cue.add_argument("--origin-system", type=int, default=255)
+    cue.add_argument(
+        "--origin-system", type=int, default=0,
+        help="sensing-platform sysid; default is the packet source sysid",
+    )
     cue.add_argument("--cue-type", type=int, choices=(1, 2, 3), default=2)
     cue.add_argument("--no-wait", action="store_true")
+
+    track = commands.add_parser(
+        "track", help="send approved TRACK_IDENTITY context for a target set"
+    )
+    track.add_argument("--target-set", type=int, required=True)
+    track.add_argument("--track-uid", help="UUID; default is generated")
+    track.add_argument("--origin-system", type=int, default=0)
+    track.add_argument("--track-age", type=float, default=1.0, help="seconds since first detection")
+    track.add_argument("--confidence", type=float, default=0.8)
+    track.add_argument("--id-method", type=int, choices=range(0, 10), default=0)
+    track.add_argument("--pid-status", type=int, choices=range(0, 4), default=1)
+    track.add_argument("--target-class", type=int, default=0)
+    track.add_argument("--target-force", type=int, default=0)
+    track.add_argument("--id-basis", default="operator observation")
+    track.add_argument("--stanag-identity", type=int, choices=range(0, 7), default=1)
+    track.add_argument("--environment", type=int, choices=range(0, 6), default=0)
+    track.add_argument("--sidc-context", type=int, choices=range(0, 3), default=0)
 
     handover = commands.add_parser(
         "handover", help="negative probe; PX4 must return UNSUPPORTED for this provisional message"
@@ -331,6 +387,17 @@ def validate_args(args) -> None:
             raise ValueError("--instance must be 0..4294967295")
         if not math.isnan(args.confidence) and not 0.0 <= args.confidence <= 1.0:
             raise ValueError("--confidence must be 0..1 or NaN")
+    if args.command == "cue" and args.origin_system and not 1 <= args.origin_system <= 255:
+        raise ValueError("--origin-system must be 1..255")
+    if args.command == "track":
+        if not 1 <= args.target_set <= 0xFFFFFFFF:
+            raise ValueError("--target-set must be 1..4294967295")
+        if args.origin_system and not 1 <= args.origin_system <= 255:
+            raise ValueError("--origin-system must be 1..255")
+        if args.track_age < 0:
+            raise ValueError("--track-age must be non-negative")
+        if not math.isnan(args.confidence) and not 0.0 <= args.confidence <= 1.0:
+            raise ValueError("--confidence must be 0..1 or NaN")
 
 
 def main() -> int:
@@ -356,6 +423,9 @@ def main() -> int:
         try:
             if args.command == "cue":
                 message_id, instance = send_cue(endpoint, args)
+            elif args.command == "track":
+                send_track_identity(endpoint, args)
+                return 0
             elif args.command == "handover":
                 message_id, instance = send_handover(endpoint, args)
             else:

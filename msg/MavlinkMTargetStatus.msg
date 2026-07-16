@@ -3,6 +3,7 @@
 
 uint64 timestamp
 uint64 assignment_time_usec
+uint64 track_identity_time_usec
 
 uint8 STATE_IDLE = 0
 uint8 STATE_PENDING = 1
@@ -15,8 +16,10 @@ uint8 state
 
 uint32 message_id
 uint32 instance_id
+uint32 target_set_id
 uint8 source_system
 uint8 source_component
+uint8 origin_system
 uint8 target_class
 uint8 target_force
 uint8 queue_depth
@@ -25,6 +28,7 @@ bool prompt
 bool restored
 bool source_fresh
 bool position_valid
+bool track_identity_valid
 
 int32 lat
 int32 lon
