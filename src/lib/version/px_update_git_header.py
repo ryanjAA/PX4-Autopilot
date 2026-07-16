@@ -144,6 +144,20 @@ if (os.path.exists('src/modules/mavlink/mavlink/.git')):
 #define MAVLINK_LIB_GIT_VERSION_STR  "{mavlink_git_version}"
 #define MAVLINK_LIB_GIT_VERSION_BINARY 0x{mavlink_git_version_short}
 """
+elif os.path.isdir('src/modules/mavlink/mavlink'):
+    # The AA release branch vendors MAVLink into the PX4 repository instead of
+    # retaining it as a git submodule. Use the committed git tree object as the
+    # deterministic library identity so clean-clone builds still define the
+    # protocol-version symbols and never depend on an untracked nested .git.
+    mavlink_git_version = subprocess.check_output(
+        ['git', 'rev-parse', 'HEAD:src/modules/mavlink/mavlink'],
+        stderr=subprocess.STDOUT).decode('utf-8').strip()
+    mavlink_git_version_short = mavlink_git_version[0:16]
+
+    header += f"""
+#define MAVLINK_LIB_GIT_VERSION_STR  "{mavlink_git_version}"
+#define MAVLINK_LIB_GIT_VERSION_BINARY 0x{mavlink_git_version_short}
+"""
 
 
 # NuttX
