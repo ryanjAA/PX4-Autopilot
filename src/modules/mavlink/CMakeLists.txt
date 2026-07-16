@@ -35,14 +35,44 @@ set(MAVLINK_GIT_DIR "${CMAKE_CURRENT_LIST_DIR}/mavlink")
 set(MAVLINK_LIBRARY_DIR "${CMAKE_BINARY_DIR}/mavlink")
 file(RELATIVE_PATH MAVLINK_GIT_DIR_RELATIVE ${CMAKE_SOURCE_DIR} ${MAVLINK_GIT_DIR})
 
-px4_add_git_submodule(TARGET git_mavlink_v2 PATH "${MAVLINK_GIT_DIR}")
+file(GLOB MAVLINK_GENERATOR_SOURCES
+	"${MAVLINK_GIT_DIR}/pymavlink/generator/*.py"
+	"${MAVLINK_GIT_DIR}/pymavlink/generator/*.xsd"
+	"${MAVLINK_GIT_DIR}/pymavlink/generator/C/include_v2.0/*"
+)
+
+file(STRINGS "${MAVLINK_GIT_DIR}/pymavlink/__init__.py" MAVLINK_GENERATOR_VERSION_LINE
+	REGEX "^__version__ = '2\\.4\\.49'$"
+)
+
+if(NOT MAVLINK_GENERATOR_VERSION_LINE)
+	message(FATAL_ERROR "AAGS profile requires vendored pymavlink 2.4.49")
+endif()
+
+if("${CONFIG_MAVLINK_DIALECT}" STREQUAL "mavlink_m")
+	file(SHA256 "${MAVLINK_GIT_DIR}/message_definitions/v1.0/mavlink_m.xml" MAVLINK_M_CORE_SHA256)
+
+	if(NOT "${MAVLINK_M_CORE_SHA256}" STREQUAL "8ab02215d036f454bf76fee9d73985fa639f2b8ca9509bf24cc51b0cb35d3b4b")
+		message(FATAL_ERROR "AAGS MAVLink-M canonical XML hash mismatch: ${MAVLINK_M_CORE_SHA256}")
+	endif()
+endif()
+
+# This vendor branch tracks the MAVLink generator sources directly rather than
+# as a gitlink. Preserve upstream submodule handling when a nested .git marker
+# exists, and provide the same dependency target for the vendored layout.
+if(EXISTS "${MAVLINK_GIT_DIR}/.git")
+	px4_add_git_submodule(TARGET git_mavlink_v2 PATH "${MAVLINK_GIT_DIR}")
+else()
+	add_custom_target(git_mavlink_v2)
+endif()
 
 # always generate uAvionix dialect
 set(MAVLINK_DIALECT_UAVIONIX "uAvionix")
 add_custom_command(
 	OUTPUT ${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/${MAVLINK_DIALECT_UAVIONIX}.h
 	COMMAND
-		${PYTHON_EXECUTABLE} ${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
+		${CMAKE_COMMAND} -E env PYTHONHASHSEED=0
+			${PYTHON_EXECUTABLE} ${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
 			--lang C --wire-protocol 2.0
 			#--no-validate
 			#--strict-units
@@ -51,6 +81,7 @@ add_custom_command(
 	DEPENDS
 		git_mavlink_v2
 		${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
+		${MAVLINK_GENERATOR_SOURCES}
 		${MAVLINK_GIT_DIR}/message_definitions/v1.0/${MAVLINK_DIALECT_UAVIONIX}.xml
 
 	COMMENT "Generating Mavlink ${MAVLINK_DIALECT_UAVIONIX}: ${MAVLINK_GIT_DIR_RELATIVE}/message_definitions/v1.0/${MAVLINK_DIALECT_UAVIONIX}.xml"
@@ -62,7 +93,8 @@ set_source_files_properties(${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/$
 add_custom_command(
 	OUTPUT ${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}/${CONFIG_MAVLINK_DIALECT}.h
 	COMMAND
-		${PYTHON_EXECUTABLE} ${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
+		${CMAKE_COMMAND} -E env PYTHONHASHSEED=0
+			${PYTHON_EXECUTABLE} ${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
 			--lang C --wire-protocol 2.0
 			#--no-validate
 			#--strict-units
@@ -71,6 +103,7 @@ add_custom_command(
 	DEPENDS
 		git_mavlink_v2
 		${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
+		${MAVLINK_GENERATOR_SOURCES}
 		${MAVLINK_GIT_DIR}/message_definitions/v1.0/${CONFIG_MAVLINK_DIALECT}.xml
 		${BOARD_DEFCONFIG}
 
@@ -118,6 +151,7 @@ px4_add_module(
 		mavlink_parameters.cpp
 		mavlink_rate_limiter.cpp
 		mavlink_receiver.cpp
+		MavlinkMHandler.cpp
 		mavlink_shell.cpp
 		mavlink_simple_analyzer.cpp
 		mavlink_stream.cpp
@@ -135,6 +169,7 @@ px4_add_module(
 		drivers_gyroscope
 		drivers_magnetometer
 		conversion
+		crc
 		sensor_calibration
 		geo
 		mavlink_c
@@ -147,6 +182,26 @@ px4_add_module(
 
 if(PX4_TESTING)
 	add_subdirectory(mavlink_tests)
+
+	if("${PX4_PLATFORM}" MATCHES "posix")
+		add_executable(mavlink_m_conformance_test
+			mavlink_tests/MavlinkMConformanceTest.c
+		)
+		add_dependencies(mavlink_m_conformance_test mavlink_c_generate)
+		target_include_directories(mavlink_m_conformance_test PRIVATE
+			${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}
+			${CMAKE_CURRENT_SOURCE_DIR}
+		)
+		target_compile_options(mavlink_m_conformance_test PRIVATE
+			-UNDEBUG
+			-Wno-cast-align
+			-Wno-unused-function
+			-Wno-unused-parameter
+		)
+		if(BUILD_TESTING)
+			add_test(NAME mavlink_m_conformance COMMAND mavlink_m_conformance_test --self-test)
+		endif()
+	endif()
 endif()
 
 px4_add_unit_gtest(SRC MavlinkStatustextHandlerTest.cpp

@@ -122,6 +122,7 @@ set(msg_files
 	ManualControlSetpoint.msg
 	ManualControlSwitches.msg
 	MavlinkLog.msg
+	MavlinkMTargetStatus.msg
 	MavlinkTunnel.msg
 	Mission.msg
 	MissionResult.msg

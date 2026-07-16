@@ -7,9 +7,10 @@ menuconfig MODULES_MAVLINK
 menuconfig MAVLINK_DIALECT
 depends on MODULES_MAVLINK
         string "Mavlink dialect"
-        default "common"
+	default "mavlink_m"
 	---help---
-		Select the Mavlink dialect to generate and use.
+		Select the Mavlink dialect to generate and use. This integration branch
+		defaults to the AAGS MAVLink-M dialect, which includes common.xml.
 
 menuconfig MAVLINK_UAVCAN_PARAMETERS
 depends on MODULES_MAVLINK && DRIVERS_UAVCAN

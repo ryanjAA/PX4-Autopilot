@@ -171,6 +171,16 @@ function(px4_add_common_flags)
 		add_compile_options($<$<COMPILE_LANGUAGE:CXX>:${flag}>)
 	endforeach()
 
+	# New Apple SDKs deprecate legacy libc entry points still used throughout
+	# the PX4 v1.14 baseline. Keep warnings-as-errors for PX4 diagnostics while
+	# allowing this maintained baseline to build with current Apple Clang.
+	if(APPLE AND "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+		add_compile_options(
+			$<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>
+			$<$<COMPILE_LANGUAGE:CXX>:-Wno-vla-cxx-extension>
+		)
+	endif()
+
 
 	include_directories(
 		${PX4_BINARY_DIR}

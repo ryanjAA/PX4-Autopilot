@@ -1,12 +1,10 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 parse a MAVLink protocol XML file and generate a Node.js typescript module implementation
 
 Based on original work Copyright Andrew Tridgell 2011
 Released under GNU GPL version 3 or later
 """
-from __future__ import print_function
-
 import os
 from . import mavtemplate
 
@@ -26,7 +24,7 @@ def generate_enums(dir, enums):
 
     if not os.path.isdir(dir):
         os.mkdir(dir)
-        
+
     for e in enums:
         filename = e.name.replace('_', '-')
         filename = filename.lower()

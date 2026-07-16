@@ -155,3 +155,98 @@ PARAM_DEFINE_INT32(MAV_HB_FORW_EN, 1);
  * @max 250
  */
 PARAM_DEFINE_INT32(MAV_RADIO_TOUT, 5);
+
+/**
+ * MAVLink-M endpoint mode
+ *
+ * The supplied AAGS 54xxx development dialect has no payload destination on
+ * TARGET_CUE, TARGET_HANDOVER, or MAVLINK_M_ACK. Mode 1 is therefore limited
+ * to an explicitly selected MAVLink instance and exact source endpoint. Do not
+ * use it on a shared mesh where more than one receiver may be configured.
+ *
+ * @value 0 Disabled (fail closed)
+ * @value 1 Source/link-bound development compatibility
+ * @group MAVLink-M
+ * @reboot_required true
+ */
+PARAM_DEFINE_INT32(MAV_M_MODE, 0);
+
+/**
+ * MAVLink instance carrying AAGS traffic
+ *
+ * Only this MAVLink instance may consume MAVLink-M assignment messages.
+ *
+ * @group MAVLink-M
+ * @min 0
+ * @max 7
+ * @reboot_required true
+ */
+PARAM_DEFINE_INT32(MAV_M_INST, 0);
+
+/**
+ * Exact permitted AAGS source system ID
+ *
+ * @group MAVLink-M
+ * @min 1
+ * @max 255
+ * @reboot_required true
+ */
+PARAM_DEFINE_INT32(MAV_M_SRC_SYS, 255);
+
+/**
+ * Exact permitted AAGS source component ID
+ *
+ * @group MAVLink-M
+ * @min 1
+ * @max 255
+ * @reboot_required true
+ */
+PARAM_DEFINE_INT32(MAV_M_SRC_CMP, 190);
+
+/**
+ * RC channel for Reject/Center/Accept
+ *
+ * The raw channel is interpreted as low=Reject, center=neutral, high=Accept.
+ * Zero disables pilot decisions. The control must pass through center after
+ * boot and after every decision before another edge can act.
+ *
+ * @group MAVLink-M
+ * @min 0
+ * @max 18
+ */
+PARAM_DEFINE_INT32(MAV_M_RC_CH, 0);
+
+/**
+ * Maximum PWM value for Reject
+ *
+ * @group MAVLink-M
+ * @unit us
+ * @min 800
+ * @max 1500
+ */
+PARAM_DEFINE_INT32(MAV_M_RC_REJ, 1300);
+
+/**
+ * Minimum PWM value for Accept
+ *
+ * @group MAVLink-M
+ * @unit us
+ * @min 1500
+ * @max 2200
+ */
+PARAM_DEFINE_INT32(MAV_M_RC_ACC, 1700);
+
+/**
+ * Maximum age and local lifetime of a cue
+ *
+ * TARGET_CUE has no wire expiry in the supplied profile. This parameter is
+ * therefore both the maximum accepted age and the fail-closed local lifetime
+ * measured from its UTC timestamp. Zero disables both checks and is not
+ * recommended. A valid UTC clock is required when this is nonzero.
+ *
+ * @group MAVLink-M
+ * @unit s
+ * @min 0
+ * @max 600
+ */
+PARAM_DEFINE_INT32(MAV_M_MAX_AGE, 30);

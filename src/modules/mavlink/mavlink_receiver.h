@@ -48,6 +48,7 @@
 #include "mavlink_mission.h"
 #include "mavlink_parameters.h"
 #include "MavlinkStatustextHandler.hpp"
+#include "MavlinkMHandler.hpp"
 #include "mavlink_timesync.h"
 #include "tune_publisher.h"
 
@@ -259,6 +260,7 @@ private:
 	MavlinkParametersManager	_parameters_manager;
 	MavlinkTimesync			_mavlink_timesync;
 	MavlinkStatustextHandler	_mavlink_statustext_handler;
+	MavlinkMHandler			_mavlink_m_handler;
 
 	mavlink_status_t		_status{}; ///< receiver status, used for mavlink_parse_char()
 

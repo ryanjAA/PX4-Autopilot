@@ -103,7 +103,8 @@ MavlinkReceiver::MavlinkReceiver(Mavlink *parent) :
 	_mavlink_log_handler(parent),
 	_mission_manager(parent),
 	_parameters_manager(parent),
-	_mavlink_timesync(parent)
+	_mavlink_timesync(parent),
+	_mavlink_m_handler(parent)
 {
 }
 
@@ -125,6 +126,8 @@ MavlinkReceiver::acknowledge(uint8_t sysid, uint8_t compid, uint16_t command, ui
 void
 MavlinkReceiver::handle_message(mavlink_message_t *msg)
 {
+	_mavlink_m_handler.handle_message(*msg);
+
 	switch (msg->msgid) {
 	case MAVLINK_MSG_ID_COMMAND_LONG:
 		handle_message_command_long(msg);
@@ -3377,6 +3380,7 @@ MavlinkReceiver::run()
 		const hrt_abstime t = hrt_absolute_time();
 
 		CheckHeartbeats(t);
+		_mavlink_m_handler.update();
 
 		if (t - last_send_update > timeout * 1000) {
 			_mission_manager.check_active_mission();
@@ -3602,6 +3606,7 @@ MavlinkReceiver::updateParams()
 {
 	// update parameters from storage
 	ModuleParams::updateParams();
+	_mavlink_m_handler.update_parameters();
 }
 
 void *MavlinkReceiver::start_trampoline(void *context)
