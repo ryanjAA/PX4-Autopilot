@@ -197,9 +197,21 @@ build/px4_sitl_default/mavlink_m_conformance_test --golden
 ```
 
 The golden output must be byte-identical to the AAGS
-`mavlink-m/golden/workflow-frames.json` file. The live endpoint probe should
-also cover wrong-source silence, immutable-ID collision rejection, queue-full
-rejection, restart restore, local expiry, and rejection of remote RC override.
+`mavlink-m/golden/workflow-frames.json` file. After building SITL, run the
+automated real-UDP acceptance suite:
+
+```sh
+Tools/aags_mavlink_m/run_sitl_acceptance.py \
+  --json-output /tmp/px4-aags-sitl-acceptance.json
+```
+
+The suite starts PX4 in an isolated temporary rootfs and covers exact endpoint
+configuration, relay identity, normalized track projection, wrong-source
+silence, immutable-ID collision rejection, queue-full rejection, rejection of
+remote RC override, fail-closed provisional handover, restart restoration,
+idempotent replay, and local expiry. It emits a machine-readable report and
+does not claim field release or live AAGS transmission. Physical RC acceptance,
+receiver loss, and failsafe still require the bench procedure above.
 
 Before any shared-network or real-flight release, the partner must provide and
 both repositories must adopt the same approved addressed profile, live AAGS
