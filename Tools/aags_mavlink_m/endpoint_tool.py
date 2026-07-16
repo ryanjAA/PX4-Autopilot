@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import importlib.util
 import math
+import os
 from pathlib import Path
 import select
 import socket
@@ -22,9 +23,10 @@ import time
 import uuid
 
 
-PROFILE_ID = "aags-handoff-54xxx-core"
-PROFILE_VERSION = "handoff-54xxx-2026-07-13"
-CORE_XML_SHA256 = "8ab02215d036f454bf76fee9d73985fa639f2b8ca9509bf24cc51b0cb35d3b4b"
+PROFILE_ID = "aags-private-inert-54xxx"
+PROFILE_VERSION = "private-inert-2026-07-16-v1"
+CORE_XML_SHA256 = "699b9b9369180925b06b8b8c4efcb26f1f3323970d9e79ebfa2bef69692ff7a9"
+PROFILE_SHA256 = bytes.fromhex(CORE_XML_SHA256)
 ACK_NAMES = {
     0: "RECEIVED",
     1: "ACCEPTED",
@@ -141,13 +143,48 @@ class SerialTransport:
 
 
 class Endpoint:
-    def __init__(self, dialect, transport, source_system: int, source_component: int):
+    def __init__(self, dialect, transport, source_system: int, source_component: int,
+                 signing_key: bytes | None = None, signing_link_id: int = 0):
         self.dialect = dialect
         self.transport = transport
         self.mav = dialect.MAVLink(
             transport, srcSystem=source_system, srcComponent=source_component
         )
         self.mav.robust_parsing = True
+        if signing_key is not None:
+            self.mav.signing.secret_key = signing_key
+            self.mav.signing.link_id = signing_link_id
+            self.mav.signing.timestamp = max(
+                1, int((time.time() - 1_420_070_400) * 100_000)
+            )
+            self.mav.signing.sign_outgoing = True
+
+    def send_frozen(self, message) -> bytes:
+        """Pack once so any caller retry is byte-identical, including signature."""
+        frame = bytes(message.pack(self.mav))
+        self.transport.write(frame)
+        return frame
+
+    def send_capability(self, lifetime: float = 15.0) -> None:
+        now_usec = int(time.time() * 1_000_000)
+        flags = (
+            self.dialect.MAVLINK_M_CAPABILITY_CUE_RECEIVE
+            | self.dialect.MAVLINK_M_CAPABILITY_APPLICATION_RECEIPT
+            | self.dialect.MAVLINK_M_CAPABILITY_LOCAL_DECISION
+            | self.dialect.MAVLINK_M_CAPABILITY_TASK_STATUS
+            | self.dialect.MAVLINK_M_CAPABILITY_TASK_CONTROL
+            | self.dialect.MAVLINK_M_CAPABILITY_HANDOVER
+            | self.dialect.MAVLINK_M_CAPABILITY_INERT_ONLY
+        )
+        if self.mav.signing.sign_outgoing:
+            flags |= self.dialect.MAVLINK_M_CAPABILITY_SIGNING_REQUIRED
+        message = self.mav.mavlink_m_capability_encode(
+            now_usec, now_usec + round(lifetime * 1_000_000), flags,
+            self.dialect.MAVLINK_M_ENDPOINT_AAGS,
+            self.mav.srcSystem, self.mav.srcComponent, 1, 0,
+            PROFILE_SHA256, fixed_text(PROFILE_ID, 32), fixed_text(PROFILE_VERSION, 32),
+        )
+        self.send_frozen(message)
 
     def receive(self, timeout: float):
         deadline = time.monotonic() + timeout
@@ -188,6 +225,7 @@ def print_message(message) -> None:
         print(
             f"ACK msgid={message.ack_msgid} instance={message.ack_instance} "
             f"origin={message.origin_sysid} vehicle={message.ack_sysid} "
+            f"target={message.target_system}/{message.target_component} "
             f"result={result} reason={reason!r}"
         )
     elif message.get_type() == "PARTICIPANT_POSITION":
@@ -212,8 +250,10 @@ def default_instance() -> int:
 def send_cue(endpoint: Endpoint, args) -> tuple[int, int]:
     instance = args.instance or default_instance()
     origin_system = args.origin_system or args.source_system
+    now_usec = int(time.time() * 1_000_000)
+    track_uid = uuid.UUID(args.track_uid).bytes if args.track_uid else uuid.uuid4().bytes
     message = endpoint.mav.target_cue_encode(
-        int(time.time() * 1_000_000),
+        now_usec,
         instance,
         args.target_set,
         round(args.lat * 1e7),
@@ -228,9 +268,14 @@ def send_cue(endpoint: Endpoint, args) -> tuple[int, int]:
         args.target_class,
         args.target_force,
         fixed_text(args.name, 20),
+        now_usec + round(args.valid_for * 1_000_000),
+        args.target_system,
+        args.target_component,
+        track_uid,
     )
-    endpoint.mav.send(message)
-    print(f"sent TARGET_CUE instance={instance}")
+    frame = endpoint.send_frozen(message)
+    args.frozen_frame = frame
+    print(f"sent TARGET_CUE instance={instance} track_uid={uuid.UUID(bytes=track_uid)}")
     return endpoint.dialect.MAVLINK_MSG_ID_TARGET_CUE, instance
 
 
@@ -289,22 +334,40 @@ def send_handover(endpoint: Endpoint, args) -> tuple[int, int]:
         math.nan,
         math.nan,
         math.nan,
-        instance,
-        fixed_text(args.name, 20),
+        args.target_set,
+        fixed_text(args.name, 50),
         fixed_text("", 50),
         args.confidence,
         bytes(8),
         args.target_class,
         args.target_force,
         0,
+        instance,
+        args.target_system,
+        args.target_component,
         track_uid,
     )
-    endpoint.mav.send(message)
+    frame = endpoint.send_frozen(message)
+    args.frozen_frame = frame
     print(
-        f"sent TARGET_HANDOVER target_set_id={instance} "
-        f"track_uid={uuid.UUID(bytes=track_uid)}; expecting unsupported correlation 0"
+        f"sent TARGET_HANDOVER handover_id={instance} target_set_id={args.target_set} "
+        f"track_uid={uuid.UUID(bytes=track_uid)}"
     )
-    return endpoint.dialect.MAVLINK_MSG_ID_TARGET_HANDOVER, 0
+    return endpoint.dialect.MAVLINK_MSG_ID_TARGET_HANDOVER, instance
+
+
+def send_control(endpoint: Endpoint, args) -> tuple[int, int]:
+    control_id = args.control_id or default_instance()
+    message = endpoint.mav.mavlink_m_task_control_encode(
+        int(time.time() * 1_000_000), args.task_msgid, args.task_instance,
+        control_id, args.replacement_instance, args.reason_code,
+        args.target_system, args.target_component, args.action,
+        fixed_text(args.reason, 40),
+    )
+    frame = endpoint.send_frozen(message)
+    args.frozen_frame = frame
+    print(f"sent MAVLINK_M_TASK_CONTROL control_id={control_id}")
+    return endpoint.dialect.MAVLINK_MSG_ID_MAVLINK_M_TASK_CONTROL, control_id
 
 
 def add_target_arguments(parser, require_alt: bool) -> None:
@@ -328,6 +391,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-system", type=int, default=255)
     parser.add_argument("--source-component", type=int, default=190)
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--target-system", type=int, default=1)
+    parser.add_argument("--target-component", type=int, default=1)
+    parser.add_argument("--signing-key", type=Path, help="32 raw bytes or 64 hexadecimal bytes")
+    parser.add_argument("--signing-link-id", type=int, default=0)
+    parser.add_argument("--retries", type=int, choices=range(0, 4), default=2,
+                        help="additional byte-identical retries after ACK timeout")
 
     commands = parser.add_subparsers(dest="command", required=True)
     cue = commands.add_parser("cue", help="send a non-kinetic TARGET_CUE")
@@ -338,6 +407,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="sensing-platform sysid; default is the packet source sysid",
     )
     cue.add_argument("--cue-type", type=int, choices=(1, 2, 3), default=2)
+    cue.add_argument("--valid-for", type=float, default=30.0)
+    cue.add_argument("--track-uid", help="persistent UUID; default is generated")
     cue.add_argument("--no-wait", action="store_true")
 
     track = commands.add_parser(
@@ -362,11 +433,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_target_arguments(handover, require_alt=True)
     handover.add_argument("--valid-for", type=float, default=30.0, help="validity duration, seconds")
+    handover.add_argument("--target-set", type=int, default=0)
     handover.add_argument("--track-uid", help="UUID; default is generated")
     handover.add_argument("--vx", type=float, default=math.nan)
     handover.add_argument("--vy", type=float, default=math.nan)
     handover.add_argument("--vz", type=float, default=math.nan)
     handover.add_argument("--no-wait", action="store_true")
+
+    control = commands.add_parser("control", help="send an addressed cancel/supersede request")
+    control.add_argument("--task-msgid", type=int, choices=(54001, 54002), required=True)
+    control.add_argument("--task-instance", type=int, required=True)
+    control.add_argument("--control-id", type=int, default=0)
+    control.add_argument("--action", type=int, choices=(0, 1), required=True,
+                         help="0=CANCEL, 1=SUPERSEDE")
+    control.add_argument("--replacement-instance", type=int, default=0)
+    control.add_argument("--reason-code", type=int, default=0)
+    control.add_argument("--reason", default="operator control")
+    control.add_argument("--no-wait", action="store_true")
+
+    commands.add_parser("capability", help="send one private-profile capability advertisement")
 
     listen = commands.add_parser("listen", help="print ACK, PPLI, and OSD telemetry")
     listen.add_argument("--duration", type=float, default=30.0)
@@ -376,10 +461,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args) -> None:
-    for name in ("source_system", "source_component"):
+    for name in ("source_system", "source_component", "target_system", "target_component"):
         value = getattr(args, name)
         if not 1 <= value <= 255:
             raise ValueError(f"--{name.replace('_', '-')} must be 1..255")
+    if not 0 <= args.signing_link_id <= 255:
+        raise ValueError("--signing-link-id must be 0..255")
     if args.command in ("cue", "handover"):
         if not -90.0 <= args.lat <= 90.0 or not -180.0 <= args.lon <= 180.0:
             raise ValueError("latitude/longitude out of WGS84 bounds")
@@ -387,6 +474,8 @@ def validate_args(args) -> None:
             raise ValueError("--instance must be 0..4294967295")
         if not math.isnan(args.confidence) and not 0.0 <= args.confidence <= 1.0:
             raise ValueError("--confidence must be 0..1 or NaN")
+        if args.valid_for <= 0 or args.valid_for > 300:
+            raise ValueError("--valid-for must be greater than zero and at most 300 seconds")
     if args.command == "cue" and args.origin_system and not 1 <= args.origin_system <= 255:
         raise ValueError("--origin-system must be 1..255")
     if args.command == "track":
@@ -398,6 +487,29 @@ def validate_args(args) -> None:
             raise ValueError("--track-age must be non-negative")
         if not math.isnan(args.confidence) and not 0.0 <= args.confidence <= 1.0:
             raise ValueError("--confidence must be 0..1 or NaN")
+    if args.command == "control":
+        if not 1 <= args.task_instance <= 0xFFFFFFFF:
+            raise ValueError("--task-instance must be nonzero")
+        if args.action == 0 and args.replacement_instance != 0:
+            raise ValueError("CANCEL requires --replacement-instance 0")
+        if args.action == 1 and not 1 <= args.replacement_instance <= 0xFFFFFFFF:
+            raise ValueError("SUPERSEDE requires a nonzero --replacement-instance")
+
+
+def read_signing_key(path: Path | None) -> bytes | None:
+    if path is None:
+        return None
+    if os.name == "posix" and path.stat().st_mode & 0o077:
+        raise ValueError("signing key file must not be accessible by group or other")
+    data = path.read_bytes()
+    if len(data) == 64:
+        try:
+            data = bytes.fromhex(data.decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise ValueError("signing key must be 32 raw bytes or 64 hexadecimal bytes") from error
+    if len(data) != 32 or not any(data):
+        raise ValueError("signing key must be 32 nonzero raw bytes or 64 hexadecimal bytes")
+    return data
 
 
 def main() -> int:
@@ -418,9 +530,14 @@ def main() -> int:
             transport = UdpTransport(args.udp_bind, args.udp_destination)
 
         endpoint = Endpoint(
-            dialect, transport, args.source_system, args.source_component
+            dialect, transport, args.source_system, args.source_component,
+            read_signing_key(args.signing_key), args.signing_link_id,
         )
         try:
+            if args.command in ("cue", "handover", "control"):
+                endpoint.send_capability()
+                time.sleep(0.05)
+
             if args.command == "cue":
                 message_id, instance = send_cue(endpoint, args)
             elif args.command == "track":
@@ -428,15 +545,33 @@ def main() -> int:
                 return 0
             elif args.command == "handover":
                 message_id, instance = send_handover(endpoint, args)
+            elif args.command == "control":
+                message_id, instance = send_control(endpoint, args)
+            elif args.command == "capability":
+                endpoint.send_capability()
+                print("sent MAVLINK_M_CAPABILITY")
+                return 0
             else:
                 deadline = time.monotonic() + args.duration
+                next_capability = 0.0
                 while time.monotonic() < deadline:
+                    if time.monotonic() >= next_capability:
+                        endpoint.send_capability()
+                        next_capability = time.monotonic() + 5.0
                     for message in endpoint.receive(deadline - time.monotonic()):
                         print_message(message)
                 return 0
 
             if not args.no_wait:
-                print_message(endpoint.wait_for_ack(message_id, instance, args.timeout))
+                for attempt in range(args.retries + 1):
+                    try:
+                        print_message(endpoint.wait_for_ack(message_id, instance, args.timeout))
+                        break
+                    except TimeoutError:
+                        if attempt >= args.retries:
+                            raise
+                        transport.write(args.frozen_frame)
+                        print(f"byte-identical retry {attempt + 1}/{args.retries}")
             return 0
         finally:
             transport.close()

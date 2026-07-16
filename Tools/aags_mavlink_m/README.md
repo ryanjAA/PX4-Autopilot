@@ -1,117 +1,37 @@
-# AAGS MAVLink-M PX4 endpoint
+# Private inert AAGS ↔ PX4 MAVLink-M profile
 
-This branch carries the PX4 receiving endpoint for the exact provisional AAGS
-profile supplied in `references.zip`:
+This branch implements the owner-authorized private development profile in
+both AAGS and PX4. It is for inert development and real-environment observation
+testing only. It does not publish navigation setpoints, missions, vehicle
+commands, flight-mode or arming commands, actuator commands, or payload
+commands, and it does not claim partner or field approval.
 
-- profile: `aags-handoff-54xxx-core`
-- version: `handoff-54xxx-2026-07-13`
-- canonical core XML SHA-256:
-  `8ab02215d036f454bf76fee9d73985fa639f2b8ca9509bf24cc51b0cb35d3b4b`
+Profile identity:
+
+- ID: `aags-private-inert-54xxx`
+- version: `private-inert-2026-07-16-v1`
+- canonical XML SHA-256:
+  `699b9b9369180925b06b8b8c4efcb26f1f3323970d9e79ebfa2bef69692ff7a9`
+- provisional private IDs: `54000` through `54007`
 - wire protocol: MAVLink 2
 
-The dialect file is
-`src/modules/mavlink/mavlink/message_definitions/v1.0/mavlink_m.xml`.
-PX4's default MAVLink dialect is changed to `mavlink_m`, including SITL.
-The previously incomplete vendored generator is pinned to pymavlink 2.4.49,
-includes its fixed C templates, and runs with `PYTHONHASHSEED=0`. All 24
-generated MAVLink-M message headers are byte-identical to the AAGS artifacts.
-PX4 retains its own `common.xml` dependency so v1.14 platform messages and
-extensions remain available; consequently the whole aggregate header tree is
-not claimed to have the AAGS/QGC fielded-common tree hash. The custom protocol
-headers and workflow frames are the cross-repository conformance surface.
+The implemented workflow uses exact nonzero system/component addresses,
+addressed ACKs, UUID track identity carried on every cue/handover, explicit
+task status, idempotent cancel/supersede controls, unique handover IDs, fresh
+exact-hash capability advertisements, durable application storage, and bounded
+retries.
 
-## Contract boundary
+## PX4 configuration
 
-The supplied partner manifest is provisional, has `field_release=false`, and
-has live AAGS `TARGET_CUE` transmission disabled. Its workflow allowlist is
-only `TRACK_IDENTITY`, `TARGET_CUE`, and `MAVLINK_M_ACK`.
+`MAV_M_MODE=0` is the default and ignores all private task traffic.
 
-The current `TARGET_CUE` and `MAVLINK_M_ACK` payloads have no recipient
-component fields. The profile has no task-lifecycle message, cue expiry,
-capability advertisement, cancellation, or transport-authentication contract.
-`TARGET_HANDOVER` has neither a unique offer ID nor approved workflow status.
-PX4 therefore does not claim addressed-mesh or field conformance:
+- `MAV_M_MODE=1`: private inert lab mode, unsigned.
+- `MAV_M_MODE=2`: private inert physical-link mode. MAVLink 2 signing is
+  mandatory for every frame on the selected link.
 
-- `MAV_M_MODE=0` is the default and ignores all cue traffic.
-- Mode 1 is a point-to-point development compatibility mode bound to one
-  MAVLink instance and one exact sender system/component.
-- `TARGET_HANDOVER` returns `UNSUPPORTED` with ACK instance zero. PX4 does not
-  misuse `target_set_id` as a handover ID.
-- No custom message outside the current allowlist is transmitted. Normal PX4
-  heartbeat/position telemetry remains the vehicle-discovery source.
-- A real shared mesh must wait for the addressed-cue/ACK PCR and matching AAGS
-  encoder. Link and sender filtering cannot replace payload addressing.
-
-The included endpoint tool can exercise the PX4 receiver over a dedicated
-bench link before the AAGS live-send gate is approved. It is not an alternate
-field release.
-
-## Behavior implemented on PX4
-
-A valid cue from the configured link and sender is checked for:
-
-- MAVLink 2 message ID, generated layout, length, and CRC;
-- exact configured packet sender and a nonzero sensing-platform `origin_sysid`;
-- nonzero cue ID and immutable payload for that ID;
-- UTC timestamp age/future bounds;
-- WGS84 bounds, finite/NaN rules, confidence range, cue intent, and enum range;
-- a bounded two-item inbox and an eight-item durable replay/terminal cache.
-
-Packet sender identity and sensing-platform identity are kept separate. The
-configured `MAV_M_SRC_SYS`/`MAV_M_SRC_CMP` identify the AAGS component that
-encoded the packet. `TARGET_CUE.origin_sysid` identifies the sensing platform
-described by the canonical field and may differ when AAGS relays a contact.
-
-The approved `TRACK_IDENTITY` workflow message is accepted from that same
-configured packet source. A fresh, nonzero `target_set_id` can bind its stable
-track UUID to a cue carrying the same target-set and sensing-origin values. The
-identity enriches display/audit state only; it cannot authorize navigation or
-engagement. A target-set collision with a different UUID is ignored.
-
-`RECEIVED` is sent only after an atomic, CRC-protected state commit to
-`PX4_STORAGEDIR/mavlink_m_state.bin`. The persisted record is bound to the
-profile hash, MAVLink instance, and sender identity. Pending/active state is
-restored after reboot. A changed payload reusing an ID is rejected; identical
-replays repeat the current ACK.
-
-Because `TARGET_CUE` has no expiry field, `MAV_M_MAX_AGE` is also used as its
-local fail-closed lifetime measured from the cue UTC timestamp. Default is 30
-seconds. Expiry is persisted before the `EXPIRED` ACK.
-
-The local pilot decision input is deliberately restricted to a physical
-`input_rc` source. MAVLink `RC_CHANNELS_OVERRIDE`, unknown input, stale input,
-loss, and failsafe cannot accept or reject a cue. The switch must cross center
-after boot and after every decision:
-
-- low (`<= MAV_M_RC_REJ`): reject the oldest pending cue; if none is pending,
-  abort the active cue;
-- center: arm exactly one subsequent decision edge;
-- high (`>= MAV_M_RC_ACC`): accept the oldest pending cue;
-- accepting while another cue is active queues the new cue instead of
-  overwriting the active one.
-
-Acceptance only changes this endpoint's task-display state. The handler never
-publishes a position setpoint, mission item, vehicle command, flight-mode or
-arming command, payload command, or actuator command.
-
-The `mavlink_m_target_status` uORB topic exposes pending/active/queued/terminal
-state plus target bearing, relative bearing, and range. A common MAVLink
-`DEBUG_VECT` named `AAGS_TGT` exports absolute bearing in `x`, relative bearing
-in `y`, and range metres in `z` at 5 Hz for an OSD/GCS adapter. This telemetry
-does not command the aircraft.
-
-## Vehicle setup
-
-Build the exact flight-controller target that will be installed. For example:
-
-```sh
-make px4_fmu-v5_default
-```
-
-Keep the endpoint disabled while configuring it. On the PX4 shell:
+Configure the exact MAVLink instance and AAGS packet source before enabling:
 
 ```text
-mavlink status
 param set MAV_M_MODE 0
 param set MAV_M_INST 0
 param set MAV_M_SRC_SYS 255
@@ -123,13 +43,16 @@ param set MAV_M_MAX_AGE 30
 param save
 ```
 
-`MAV_M_INST` is the zero-based instance printed by `mavlink status`. Set the
-source IDs to the AAGS MAVLink sender identity; AAGS currently obtains these
-from its MAVLink protocol settings. Select a dedicated serial/radio instance,
-not a shared vehicle mesh. Verify MAVLink 2 end to end and test the configured
-physical RC switch, receiver loss, and failsafe on the bench.
+`MAV_M_INST` is the zero-based instance shown by `mavlink status`. The local
+PX4 recipient is its current `MAV_SYS_ID` and autopilot component ID (normally
+component `1`). A cue for any other payload address is silently isolated.
 
-Only after those checks, enable compatibility mode and reboot:
+The physical RC control is local authority only: center arms one decision,
+high accepts the oldest pending task, and low rejects it (or aborts the active
+task when no pending task exists). MAVLink RC override, stale/lost input, and
+failsafe input cannot decide a task.
+
+For unsigned lab use:
 
 ```text
 param set MAV_M_MODE 1
@@ -137,85 +60,115 @@ param save
 reboot
 ```
 
-For a network link, the normal `MAV_n_*` settings still control UDP/serial
-transport. The compatibility mode adds application filtering; it does not add
-encryption, authentication, signing, or payload recipient fields.
+## Signing-key provisioning
 
-## SITL and bench probe
-
-Build and run the in-process simulator:
+Generate one random 32-byte key outside both repositories and provision the
+same bytes at both endpoints. Never commit it.
 
 ```sh
-make px4_sitl_default
-make px4_sitl sihsim_quadx
+openssl rand 32 > mavlink_m_signing.key
+chmod 600 mavlink_m_signing.key
 ```
 
-Configure `MAV_M_MODE=1` at the PX4 prompt. The default SITL instance 0 listens
-on UDP 18570 and sends to UDP 14550. In another terminal:
+On flight hardware, copy it to:
+
+```text
+/fs/microsd/mavlink_m_signing.key
+```
+
+On PX4 SITL it belongs at `<rootfs>/mavlink_m_signing.key`. PX4 also accepts
+exactly 64 hexadecimal characters. Then configure a unique signing link ID and
+enable physical mode:
+
+```text
+param set MAV_M_LNK_ID 7
+param set MAV_M_MODE 2
+param save
+reboot
+```
+
+Use a dedicated physical task link in mode 2: PX4 rejects every unsigned frame
+on the selected link and signs every outbound frame on it.
+
+Start AAGS with the same key and explicit private runtime enablement:
 
 ```sh
-Tools/aags_mavlink_m/endpoint_tool.py track \
-  --target-set 45 --origin-system 1 \
-  --track-uid 00112233-4455-6677-8899-aabbccddeeff
-
-Tools/aags_mavlink_m/endpoint_tool.py cue \
-  --instance 731 --target-set 45 --origin-system 1 \
-  --lat 45.4671 --lon -73.7578 --alt 50 \
-  --name "training cue"
+AAGS_MAVLINK_M_PRIVATE_ENABLE=1 \
+AAGS_MAVLINK_M_SIGNING_MODE=required \
+AAGS_MAVLINK_M_SIGNING_KEY_FILE=/secure/path/mavlink_m_signing.key \
+./AAGS
 ```
 
-Expected response:
+For an isolated unsigned lab link, omit the signing variables but retain
+`AAGS_MAVLINK_M_PRIVATE_ENABLE=1`.
 
-```text
-ACK msgid=54001 instance=731 ... result=RECEIVED reason='stored pending pilot decision'
+## Using AAGS
+
+Build AAGS with:
+
+```sh
+qmake qgroundcontrol.pro CONFIG+=AAGS_MAVLINK_M CONFIG+=AAGS_TACTICAL_CONTACTS
+make -j4
 ```
 
-Inspect PX4's normalized state with:
+In the cue composer, select an exact destination and link, choose either an
+observation action or `Handover / transfer`, and complete the final inert
+live-send confirmation. The task roster shows receipts and explicit lifecycle
+status. `CANCEL` sends an idempotent addressed control. The network inbox can
+accept/reject incoming cues or handovers and report READY, COMPLETE, or ABORT.
 
-```text
-listener mavlink_m_target_status 1
-```
+Capability advertisements are emitted every five seconds. A task is not sent
+or accepted without a fresh advertisement matching the exact profile hash,
+version, signing policy, and inert capabilities.
 
-For a dedicated serial radio instead of SITL UDP:
+## Bench command-line probe
+
+The tool generates its Python dialect from the checked-in XML and refuses a
+hash mismatch. It sends a capability advertisement before each task and packs
+the task once for at most two additional byte-identical lab retries.
 
 ```sh
 Tools/aags_mavlink_m/endpoint_tool.py \
-  --serial /dev/ttyUSB0 --baud 57600 cue \
+  --source-system 255 --source-component 190 \
+  --target-system 1 --target-component 1 \
+  cue --instance 731 \
+  --track-uid 00112233-4455-6677-8899-aabbccddeeff \
+  --lat 45.4671 --lon -73.7578 --alt 50 --valid-for 30
+
+Tools/aags_mavlink_m/endpoint_tool.py \
+  --target-system 1 --target-component 1 \
+  handover --instance 9002 --target-set 45 \
+  --track-uid 00112233-4455-6677-8899-aabbccddeeff \
   --lat 45.4671 --lon -73.7578 --alt 50
+
+Tools/aags_mavlink_m/endpoint_tool.py \
+  --target-system 1 --target-component 1 \
+  control --task-msgid 54001 --task-instance 731 \
+  --action 0 --reason "operator cancel"
 ```
 
-The tool generates its Python binding from the checked-in XML and refuses to
-run if the hash differs. Install the repository Python requirements first.
+Add `--signing-key /secure/path/mavlink_m_signing.key --signing-link-id 7`
+before the subcommand for a signed physical-link probe.
+
+MAVLink 2 signing deliberately rejects a previously authenticated signed
+envelope as a replay. The immutable application payload/control ID remains
+identical, but a post-delivery retry needs a fresh signing timestamp. Unsigned
+lab tests additionally prove whole-frame byte identity.
 
 ## Verification
 
-The C conformance binary is built with SITL testing enabled:
-
 ```sh
 build/px4_sitl_default/mavlink_m_conformance_test --self-test
-build/px4_sitl_default/mavlink_m_conformance_test --golden
-```
 
-The golden output must be byte-identical to the AAGS
-`mavlink-m/golden/workflow-frames.json` file. After building SITL, run the
-automated real-UDP acceptance suite:
-
-```sh
 Tools/aags_mavlink_m/run_sitl_acceptance.py \
-  --json-output /tmp/px4-aags-sitl-acceptance.json
+  --json-output /tmp/px4-aags-private-sitl.json
+
+Tools/aags_mavlink_m/run_sitl_acceptance.py --signed \
+  --json-output /tmp/px4-aags-private-sitl-signed.json
 ```
 
-The suite starts PX4 in an isolated temporary rootfs and covers exact endpoint
-configuration, relay identity, normalized track projection, wrong-source
-silence, immutable-ID collision rejection, queue-full rejection, rejection of
-remote RC override, fail-closed provisional handover, restart restoration,
-idempotent replay, and local expiry. It emits a machine-readable report and
-does not claim field release or live AAGS transmission. Physical RC acceptance,
-receiver loss, and failsafe still require the bench procedure above.
-
-Before any shared-network or real-flight release, the partner must provide and
-both repositories must adopt the same approved addressed profile, live AAGS
-encoder, ACK recipient/correlation rules, capability advertisement, task
-lifecycle/cancel semantics, and transport-authentication policy. Re-run the
-golden and end-to-end tests after that protocol change; do not enable the
-current compatibility mode as a substitute.
+The suite uses an isolated PX4 instance and UDP link, exercises cue, handover,
+cancel, supersede, status, wrong-source isolation, persistence/restart,
+bounded inbox behavior, RC-override rejection, expiry, and signing, and emits a
+machine-readable report. Physical RC/failsafe behavior and the exact installed
+hardware target still require an inert bench acceptance before use.

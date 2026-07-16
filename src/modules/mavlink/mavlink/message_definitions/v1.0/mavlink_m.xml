@@ -488,6 +488,44 @@
       <entry value="5" name="MAVLINK_M_ACK_EXPIRED">    <description>Message was received after its validity window had passed.</description></entry>
     </enum>
 
+    <!-- ===== private inert-development task workflow ===== -->
+    <enum name="MAVLINK_M_TASK_STATE">
+      <description>Explicit application task lifecycle. These states report observation-task progress only and never imply navigation, arming, payload authorization, or target effect.</description>
+      <entry value="0" name="MAVLINK_M_TASK_STATE_UNKNOWN"><description>Unknown or future state. Does not mutate a known task.</description></entry>
+      <entry value="1" name="MAVLINK_M_TASK_STATE_ACTIVE"><description>The destination reports that the accepted observation task is active.</description></entry>
+      <entry value="2" name="MAVLINK_M_TASK_STATE_EN_ROUTE"><description>The destination operator reports en-route progress. Vehicle motion alone must not generate this state.</description></entry>
+      <entry value="3" name="MAVLINK_M_TASK_STATE_READY"><description>The destination operator reports ready/on-station for the observation task.</description></entry>
+      <entry value="4" name="MAVLINK_M_TASK_STATE_COMPLETE"><description>The destination reports its observation task complete. This is not evidence of target effect.</description></entry>
+      <entry value="5" name="MAVLINK_M_TASK_STATE_ABORTED"><description>The accepted task was terminated before completion.</description></entry>
+      <entry value="6" name="MAVLINK_M_TASK_STATE_FAILED"><description>The destination could not complete the accepted task.</description></entry>
+      <entry value="7" name="MAVLINK_M_TASK_STATE_EXPIRED"><description>The task expired locally without completion.</description></entry>
+    </enum>
+
+    <enum name="MAVLINK_M_TASK_CONTROL_ACTION">
+      <description>Idempotent originator control of one immutable task instance. Local destination safety and operator authority always take precedence.</description>
+      <entry value="0" name="MAVLINK_M_TASK_CONTROL_CANCEL"><description>Request cancellation or termination of the named task.</description></entry>
+      <entry value="1" name="MAVLINK_M_TASK_CONTROL_SUPERSEDE"><description>Replace the named task with replacement_instance from the same originator.</description></entry>
+    </enum>
+
+    <enum name="MAVLINK_M_ENDPOINT_TYPE">
+      <description>Application endpoint type advertising this private inert-development profile.</description>
+      <entry value="0" name="MAVLINK_M_ENDPOINT_UNKNOWN"><description>Unknown endpoint; not taskable.</description></entry>
+      <entry value="1" name="MAVLINK_M_ENDPOINT_AAGS"><description>AAGS operator application endpoint.</description></entry>
+      <entry value="2" name="MAVLINK_M_ENDPOINT_PX4_PILOT"><description>PX4 pilot-decision endpoint with physical local authority.</description></entry>
+    </enum>
+
+    <enum name="MAVLINK_M_CAPABILITY_FLAGS" bitmask="true">
+      <description>Capabilities bound to the exact profile hash and freshness window in MAVLINK_M_CAPABILITY.</description>
+      <entry value="1" name="MAVLINK_M_CAPABILITY_CUE_RECEIVE"><description>Can receive an exactly addressed TARGET_CUE.</description></entry>
+      <entry value="2" name="MAVLINK_M_CAPABILITY_APPLICATION_RECEIPT"><description>Returns RECEIVED only after durable application storage.</description></entry>
+      <entry value="4" name="MAVLINK_M_CAPABILITY_LOCAL_DECISION"><description>Returns explicit local Accept/Reject decisions.</description></entry>
+      <entry value="8" name="MAVLINK_M_CAPABILITY_TASK_STATUS"><description>Sends and receives explicit MAVLINK_M_TASK_STATUS.</description></entry>
+      <entry value="16" name="MAVLINK_M_CAPABILITY_TASK_CONTROL"><description>Supports addressed cancel/supersede control.</description></entry>
+      <entry value="32" name="MAVLINK_M_CAPABILITY_HANDOVER"><description>Supports unique-instance TARGET_HANDOVER.</description></entry>
+      <entry value="64" name="MAVLINK_M_CAPABILITY_SIGNING_REQUIRED"><description>Requires valid MAVLink 2 signing on physical task links.</description></entry>
+      <entry value="128" name="MAVLINK_M_CAPABILITY_INERT_ONLY"><description>Profile cannot command navigation, arming, flight mode, or payloads.</description></entry>
+    </enum>
+
     <!-- ===== multi-store logistics drop ===== -->
     <enum name="MAVLINK_M_STORE_SENSOR_TYPE">
       <description>Type of sensor feeding a store's deceleration/landing-trigger system.</description>
@@ -1172,6 +1210,9 @@
       <field type="uint8_t"   name="target_force"     enum="MAVLINK_M_TARGET_FORCE">Force affiliation.</field>
       <field type="uint8_t"   name="match_media_type" enum="MAVLINK_M_MATCH_MEDIA_TYPE">Type of matching media referenced by match_media_url.</field>
       <extensions/>
+      <field type="uint32_t" name="handover_id">Immutable handover instance assigned by the packet sender. Nonzero; retries preserve this ID and exact bytes.</field>
+      <field type="uint8_t" name="target_system">Sole destination MAVLink system. Must be nonzero and exactly match the receiving application.</field>
+      <field type="uint8_t" name="target_component">Sole destination MAVLink application component. Must be nonzero and exactly match the receiving endpoint.</field>
       <field type="uint8_t[16]" name="track_uid">Globally-unique track identifier (UUID) of the TRACK_IDENTITY this handover transfers. The authoritative correlation handle across aircraft; target_name is a human label only. All-zero if not associated with a track.</field>
     </message>
 
@@ -1365,6 +1406,11 @@
       <field type="uint8_t"  name="target_class"  enum="MAVLINK_M_TARGET_CLASS">Provisional target classification from the sensing platform, qualified by confidence_score. A hint, not an identification.</field>
       <field type="uint8_t"  name="target_force"  enum="MAVLINK_M_TARGET_FORCE">Provisional force affiliation from the sensing platform, qualified by confidence_score. A hint, not a combat-ID determination; do not use as a release input.</field>
       <field type="char[20]" name="name"                        >Short human-readable label (null-terminated).</field>
+      <extensions/>
+      <field type="uint64_t" name="valid_until_usec" units="us">Absolute UTC expiry. Must be later than time_usec and nonzero.</field>
+      <field type="uint8_t" name="target_system">Sole destination MAVLink system. Must be nonzero and exactly match the receiving application.</field>
+      <field type="uint8_t" name="target_component">Sole destination MAVLink application component. Must be nonzero and exactly match the receiving endpoint.</field>
+      <field type="uint8_t[16]" name="track_uid">Persistent TRACK_IDENTITY UUID. All-zero means absent; a nonzero value follows TRACK_IDENTITY byte ordering.</field>
     </message>
 
     <!-- ============================================================ -->
@@ -1379,12 +1425,61 @@
         originator can match the ACK to the specific item.
       </description>
       <field type="uint64_t" name="time_usec"     units="us"  >Timestamp (UNIX epoch, microseconds UTC).</field>
-      <field type="uint32_t" name="ack_msgid"                  >MAVLink message ID being acknowledged (e.g. 60011 for TARGET_CUE).</field>
+      <field type="uint32_t" name="ack_msgid"                  >MAVLink message ID being acknowledged. TARGET_CUE uses 54001 and TARGET_HANDOVER uses 54002.</field>
       <field type="uint32_t" name="ack_instance"               >Instance identifier of the acknowledged item (e.g. cue_id / target_set_id / sequence). 0 if not applicable.</field>
       <field type="uint8_t"  name="origin_sysid"               >System ID of the originator of the acknowledged message.</field>
       <field type="uint8_t"  name="ack_sysid"                  >System ID of the system issuing this acknowledgment.</field>
       <field type="uint8_t"  name="result"        enum="MAVLINK_M_ACK_RESULT">Result of receiving/processing the acknowledged message.</field>
       <field type="char[50]" name="reason"                     >Optional human-readable reason, primarily for REJECTED/FAILED (null-terminated).</field>
+      <extensions/>
+      <field type="uint8_t" name="target_system">Sole destination system for this ACK. Must identify the original packet sender and be nonzero.</field>
+      <field type="uint8_t" name="target_component">Sole destination component for this ACK. Must identify the original packet sender and be nonzero.</field>
+    </message>
+
+    <!-- ============================================================ -->
+    <!-- Private inert-development workflow messages. 54005-54007 are -->
+    <!-- provisional local IDs and are not an upstream allocation.     -->
+    <!-- ============================================================ -->
+    <message id="54005" name="MAVLINK_M_TASK_STATUS">
+      <description>Exactly addressed lifecycle status for one immutable cue or handover. Application state only; never infer it from motion, flight mode, arming, or payload state.</description>
+      <field type="uint64_t" name="time_usec" units="us">UTC time of this status event.</field>
+      <field type="uint32_t" name="task_msgid">Message type that created the task, normally 54001 or 54002.</field>
+      <field type="uint32_t" name="task_instance">cue_id or handover_id of the immutable task.</field>
+      <field type="uint32_t" name="status_sequence">Monotonic per-task sequence assigned by the status originator. Retries preserve it.</field>
+      <field type="uint16_t" name="reason_code">Profile-defined bounded machine reason; zero when not applicable.</field>
+      <field type="uint8_t" name="target_system">Sole recipient system. Must be nonzero.</field>
+      <field type="uint8_t" name="target_component">Sole recipient component. Must be nonzero.</field>
+      <field type="uint8_t" name="state" enum="MAVLINK_M_TASK_STATE">Explicit lifecycle state.</field>
+      <field type="char[40]" name="reason">Optional bounded operator/application reason.</field>
+    </message>
+
+    <message id="54006" name="MAVLINK_M_TASK_CONTROL">
+      <description>Exactly addressed, idempotent cancel or supersede request for one immutable task. It cannot override destination safety logic or local operator authority.</description>
+      <field type="uint64_t" name="time_usec" units="us">UTC time the control was created.</field>
+      <field type="uint32_t" name="task_msgid">Message type that created the original task.</field>
+      <field type="uint32_t" name="task_instance">Immutable original cue_id or handover_id.</field>
+      <field type="uint32_t" name="control_id">Nonzero immutable control instance. ACK instance correlation uses this value.</field>
+      <field type="uint32_t" name="replacement_instance">Replacement cue/handover instance for SUPERSEDE; zero for CANCEL.</field>
+      <field type="uint16_t" name="reason_code">Profile-defined bounded machine reason; zero when not applicable.</field>
+      <field type="uint8_t" name="target_system">Sole recipient system. Must be nonzero.</field>
+      <field type="uint8_t" name="target_component">Sole recipient component. Must be nonzero.</field>
+      <field type="uint8_t" name="action" enum="MAVLINK_M_TASK_CONTROL_ACTION">Requested idempotent control action.</field>
+      <field type="char[40]" name="reason">Optional bounded operator reason.</field>
+    </message>
+
+    <message id="54007" name="MAVLINK_M_CAPABILITY">
+      <description>Freshness-bounded advertisement of one application endpoint and exact private profile hash. This discovery message carries no task authority.</description>
+      <field type="uint64_t" name="time_usec" units="us">UTC time this advertisement was created.</field>
+      <field type="uint64_t" name="valid_until_usec" units="us">UTC expiry of this advertisement.</field>
+      <field type="uint32_t" name="capability_flags" enum="MAVLINK_M_CAPABILITY_FLAGS" display="bitmask">Supported inert-development workflow capabilities.</field>
+      <field type="uint8_t" name="endpoint_type" enum="MAVLINK_M_ENDPOINT_TYPE">Advertising application endpoint type.</field>
+      <field type="uint8_t" name="endpoint_system">System identity of the advertising packet sender. Must equal the packet header sysid and be nonzero.</field>
+      <field type="uint8_t" name="endpoint_component">Application component of the advertising packet sender. Must equal the packet header compid and be nonzero.</field>
+      <field type="uint8_t" name="protocol_major">Private profile protocol major version.</field>
+      <field type="uint8_t" name="protocol_minor">Private profile protocol minor version.</field>
+      <field type="uint8_t[32]" name="profile_sha256">Raw SHA-256 of canonical mavlink-m.xml.</field>
+      <field type="char[32]" name="profile_id">Null-terminated profile identifier.</field>
+      <field type="char[32]" name="profile_version">Null-terminated immutable profile version.</field>
     </message>
 
     <!-- ============================================================ -->

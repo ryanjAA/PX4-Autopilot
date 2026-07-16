@@ -106,6 +106,7 @@ MavlinkReceiver::MavlinkReceiver(Mavlink *parent) :
 	_mavlink_timesync(parent),
 	_mavlink_m_handler(parent)
 {
+	_mavlink_m_handler.configure_receiver_status(&_status);
 }
 
 void

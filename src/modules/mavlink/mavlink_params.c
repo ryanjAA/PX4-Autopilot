@@ -159,17 +159,33 @@ PARAM_DEFINE_INT32(MAV_RADIO_TOUT, 5);
 /**
  * MAVLink-M endpoint mode
  *
- * The supplied AAGS 54xxx development dialect has no payload destination on
- * TARGET_CUE, TARGET_HANDOVER, or MAVLINK_M_ACK. Mode 1 is therefore limited
- * to an explicitly selected MAVLink instance and exact source endpoint. Do not
- * use it on a shared mesh where more than one receiver may be configured.
+ * Private inert-development traffic is accepted only on the selected MAVLink
+ * instance, from the exact source endpoint, after a fresh matching capability
+ * advertisement, and when the payload names this PX4 system and component.
+ * Mode 2 additionally requires a valid 32-byte MAVLink 2 signing key at
+ * PX4_STORAGEDIR/mavlink_m_signing.key and rejects every unsigned frame on the
+ * selected physical task link.
  *
  * @value 0 Disabled (fail closed)
- * @value 1 Source/link-bound development compatibility
+ * @value 1 Private inert lab transport (unsigned)
+ * @value 2 Private inert physical transport (signing required)
  * @group MAVLink-M
  * @reboot_required true
  */
 PARAM_DEFINE_INT32(MAV_M_MODE, 0);
+
+/**
+ * MAVLink 2 signing link identifier
+ *
+ * Used only by signed physical mode. It must be unique for this signing key
+ * across concurrently transmitting links.
+ *
+ * @group MAVLink-M
+ * @min 0
+ * @max 255
+ * @reboot_required true
+ */
+PARAM_DEFINE_INT32(MAV_M_LNK_ID, 0);
 
 /**
  * MAVLink instance carrying AAGS traffic

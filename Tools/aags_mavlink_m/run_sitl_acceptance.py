@@ -2,9 +2,9 @@
 """Run the live UDP AAGS MAVLink-M acceptance suite against PX4 SITL.
 
 This starts the already-built PX4 binary in an isolated rootfs, configures the
-fail-closed endpoint, exchanges real MAVLink 2 datagrams, restarts PX4 against
-the same durable state, and reports machine-readable results. It never enables
-or claims the missing addressed field profile.
+private inert endpoint, exchanges exactly addressed MAVLink 2 datagrams,
+restarts PX4 against the same durable state, and reports machine-readable
+results. It never commands navigation, flight mode, arming, or payloads.
 """
 
 from __future__ import annotations
@@ -27,10 +27,18 @@ from endpoint_tool import Endpoint, UdpTransport, fixed_text, load_dialect, text
 SOURCE_SYSTEM = 255
 SOURCE_COMPONENT = 190
 WRONG_SOURCE_SYSTEM = 254
-VEHICLE_SYSTEM = 1
+SITL_INSTANCE = 1
+VEHICLE_SYSTEM = SITL_INSTANCE + 1
 VEHICLE_COMPONENT = 1
+TEST_MAVLINK_INSTANCE = 5
+TEST_PX4_UDP_PORT = 18671
+TEST_AAGS_UDP_PORT = 14551
 TRACK_SET = 45
 TRACK_UID = uuid.UUID("00112233-4455-6677-8899-aabbccddeeff")
+PROFILE_ID = "aags-private-inert-54xxx"
+PROFILE_VERSION = "private-inert-2026-07-16-v1"
+CORE_XML_SHA256 = "699b9b9369180925b06b8b8c4efcb26f1f3323970d9e79ebfa2bef69692ff7a9"
+SIGNING_KEY = bytes(range(32))
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -39,10 +47,11 @@ class AcceptanceFailure(RuntimeError):
 
 
 class Px4Sitl:
-    def __init__(self, binary: Path, etc: Path, rootfs: Path):
+    def __init__(self, binary: Path, etc: Path, rootfs: Path, instance: int):
         self.binary = binary
         self.etc = etc
         self.rootfs = rootfs
+        self.instance = instance
         self.process: subprocess.Popen[str] | None = None
         self.lines: list[str] = []
         self.condition = threading.Condition()
@@ -56,7 +65,10 @@ class Px4Sitl:
         environment["PX4_SIM_MODEL"] = "sihsim_quadx"
         environment["PX4_SIMULATOR"] = "sihsim"
         self.process = subprocess.Popen(
-            [str(self.binary), str(self.etc), "-s", "etc/init.d-posix/rcS", "0"],
+            [
+                str(self.binary), "-i", str(self.instance), "-w", str(self.rootfs),
+                "-s", "etc/init.d-posix/rcS", str(self.etc),
+            ],
             cwd=self.rootfs,
             env=environment,
             stdin=subprocess.PIPE,
@@ -110,10 +122,10 @@ class Px4Sitl:
         self.process.stdin.write(command + "\n")
         self.process.stdin.flush()
 
-    def configure(self, max_age: int) -> None:
+    def configure(self, max_age: int, signed: bool) -> None:
         commands = [
-            "param set MAV_M_MODE 1",
-            "param set MAV_M_INST 0",
+            f"param set MAV_M_MODE {2 if signed else 1}",
+            f"param set MAV_M_INST {TEST_MAVLINK_INSTANCE}",
             f"param set MAV_M_SRC_SYS {SOURCE_SYSTEM}",
             f"param set MAV_M_SRC_CMP {SOURCE_COMPONENT}",
             "param set MAV_M_RC_CH 5",
@@ -129,8 +141,8 @@ class Px4Sitl:
         self.command("param show MAV_M_*")
         output = self.wait_for("MAV_M_SRC_SYS", mark, 5.0)
         expected = {
-            "MAV_M_MODE": 1,
-            "MAV_M_INST": 0,
+            "MAV_M_MODE": 2 if signed else 1,
+            "MAV_M_INST": TEST_MAVLINK_INSTANCE,
             "MAV_M_SRC_SYS": SOURCE_SYSTEM,
             "MAV_M_SRC_CMP": SOURCE_COMPONENT,
             "MAV_M_MAX_AGE": max_age,
@@ -142,6 +154,16 @@ class Px4Sitl:
         ]
         if missing:
             raise AcceptanceFailure(f"PX4 endpoint parameter verification failed: {missing!r}\n{output}")
+        time.sleep(0.25)
+
+    def add_test_link(self) -> None:
+        """Add one test-owned GCS link after the five standard SITL links."""
+        self.command(
+            f"mavlink start -x -u {TEST_PX4_UDP_PORT} "
+            f"-o {TEST_AAGS_UDP_PORT} -r 4000000 -f"
+        )
+        time.sleep(0.75)
+        self.command(f"mavlink stream -u {TEST_PX4_UDP_PORT} -s HEARTBEAT -r 2")
         time.sleep(0.25)
 
     def status(self) -> str:
@@ -176,6 +198,28 @@ def wait_for_heartbeat(endpoint: Endpoint, timeout: float = 12.0) -> None:
             if message.get_type() == "HEARTBEAT" and message.get_srcSystem() == VEHICLE_SYSTEM:
                 return
     raise AcceptanceFailure("no PX4 heartbeat received on UDP 14550")
+
+
+def establish_udp_peer(endpoint: Endpoint) -> None:
+    endpoint.mav.heartbeat_send(
+        endpoint.dialect.MAV_TYPE_GCS,
+        endpoint.dialect.MAV_AUTOPILOT_INVALID,
+        0, 0, 0,
+    )
+
+
+def wait_for_px4_capability(endpoint: Endpoint, timeout: float = 7.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for message in endpoint.receive(min(0.5, deadline - time.monotonic())):
+            if (
+                message.get_type() == "MAVLINK_M_CAPABILITY"
+                and message.endpoint_system == VEHICLE_SYSTEM
+                and message.endpoint_component == VEHICLE_COMPONENT
+                and message.endpoint_type == endpoint.dialect.MAVLINK_M_ENDPOINT_PX4_PILOT
+            ):
+                return message
+    raise AcceptanceFailure("PX4 did not advertise the private inert capability")
 
 
 def drain(endpoint: Endpoint, duration: float = 0.25) -> None:
@@ -218,6 +262,10 @@ def assert_ack(message, result: int, reason_contains: str) -> None:
             f"unexpected ACK result={message.result} reason={reason!r}; "
             f"wanted result={result} containing {reason_contains!r}"
         )
+    if message.target_system != SOURCE_SYSTEM or message.target_component != SOURCE_COMPONENT:
+        raise AcceptanceFailure(
+            f"ACK was not addressed back to {SOURCE_SYSTEM}/{SOURCE_COMPONENT}"
+        )
 
 
 def make_track_identity(endpoint: Endpoint, now_usec: int):
@@ -247,7 +295,8 @@ def make_track_identity(endpoint: Endpoint, now_usec: int):
     )
 
 
-def make_cue(endpoint: Endpoint, cue_id: int, now_usec: int, name: str, lat: int = 454671000):
+def make_cue(endpoint: Endpoint, cue_id: int, now_usec: int, valid_until_usec: int,
+             name: str, lat: int = 454671000):
     return endpoint.mav.target_cue_encode(
         now_usec,
         cue_id,
@@ -264,6 +313,10 @@ def make_cue(endpoint: Endpoint, cue_id: int, now_usec: int, name: str, lat: int
         0,
         0,
         fixed_text(name, 20),
+        valid_until_usec,
+        VEHICLE_SYSTEM,
+        VEHICLE_COMPONENT,
+        TRACK_UID.bytes,
     )
 
 
@@ -284,7 +337,7 @@ def make_handover(endpoint: Endpoint, now_usec: int):
         math.nan,
         math.nan,
         math.nan,
-        9002,
+        TRACK_SET,
         fixed_text("handover", 50),
         fixed_text("", 50),
         0.8,
@@ -292,7 +345,38 @@ def make_handover(endpoint: Endpoint, now_usec: int):
         0,
         0,
         0,
+        9002,
+        VEHICLE_SYSTEM,
+        VEHICLE_COMPONENT,
         TRACK_UID.bytes,
+    )
+
+
+def make_control(endpoint: Endpoint, control_id: int, task_msgid: int,
+                 task_instance: int, action: int, replacement_instance: int = 0):
+    return endpoint.mav.mavlink_m_task_control_encode(
+        int(time.time() * 1_000_000), task_msgid, task_instance, control_id,
+        replacement_instance, 0, VEHICLE_SYSTEM, VEHICLE_COMPONENT, action,
+        fixed_text("SITL inert control", 40),
+    )
+
+
+def wait_for_task_status(endpoint: Endpoint, task_msgid: int, task_instance: int,
+                         state: int, timeout: float = 4.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for message in endpoint.receive(min(0.25, deadline - time.monotonic())):
+            if (
+                message.get_type() == "MAVLINK_M_TASK_STATUS"
+                and message.task_msgid == task_msgid
+                and message.task_instance == task_instance
+                and message.state == state
+                and message.target_system == SOURCE_SYSTEM
+                and message.target_component == SOURCE_COMPONENT
+            ):
+                return message
+    raise AcceptanceFailure(
+        f"no task status state={state} for msgid={task_msgid} instance={task_instance}"
     )
 
 
@@ -308,35 +392,55 @@ def record(results: list[dict], name: str, started: float, detail: str) -> None:
     print(f"{name}=PASS {detail}")
 
 
-def run(binary: Path, etc: Path, rootfs: Path, max_age: int) -> dict:
+def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> dict:
     dialect = load_dialect()
-    transport = UdpTransport(("127.0.0.1", 14550), ("127.0.0.1", 18570))
-    endpoint = Endpoint(dialect, transport, SOURCE_SYSTEM, SOURCE_COMPONENT)
+    transport = UdpTransport(
+        ("127.0.0.1", TEST_AAGS_UDP_PORT),
+        ("127.0.0.1", TEST_PX4_UDP_PORT),
+    )
+    endpoint = Endpoint(
+        dialect, transport, SOURCE_SYSTEM, SOURCE_COMPONENT,
+        SIGNING_KEY if signed else None, 7,
+    )
     wrong_sender = dialect.MAVLink(
         transport, srcSystem=WRONG_SOURCE_SYSTEM, srcComponent=SOURCE_COMPONENT
     )
-    px4 = Px4Sitl(binary, etc, rootfs)
+    px4 = Px4Sitl(binary, etc, rootfs, SITL_INSTANCE)
     results: list[dict] = []
     cue_time = 0
     cue_one = None
     cue_two = None
+    cancel_frame = None
+    cancel_message = None
     try:
+        if signed:
+            key_path = rootfs / "mavlink_m_signing.key"
+            key_path.write_bytes(SIGNING_KEY)
+            key_path.chmod(0o600)
         started = time.monotonic()
         px4.start()
-        wait_for_heartbeat(endpoint)
-        px4.configure(max_age)
-        record(results, "sitl_start_and_endpoint_configuration", started, "UDP 18570/14550")
+        px4.add_test_link()
+        establish_udp_peer(endpoint)
+        if not signed:
+            wait_for_heartbeat(endpoint)
+        px4.configure(max_age, signed)
+        wait_for_px4_capability(endpoint)
+        record(results, "sitl_start_and_endpoint_configuration", started,
+               f"isolated UDP 18671/14551; signing={'required' if signed else 'lab-unsigned'}")
 
         started = time.monotonic()
         cue_time = int(time.time() * 1_000_000)
-        endpoint.mav.send(make_track_identity(endpoint, cue_time))
-        cue_one = make_cue(endpoint, 731, cue_time + 100_000, "relay cue")
+        cue_expiry = cue_time + max_age * 1_000_000
+        endpoint.send_capability()
+        time.sleep(0.05)
+        cue_one = make_cue(endpoint, 731, cue_time + 100_000, cue_expiry, "relay cue")
         endpoint.mav.send(cue_one)
         ack = wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 731)
         assert_ack(ack, dialect.MAVLINK_M_ACK_RECEIVED, "stored pending")
         if ack.origin_sysid != SOURCE_SYSTEM or ack.ack_sysid != VEHICLE_SYSTEM:
             raise AcceptanceFailure("receipt ACK did not preserve sender/vehicle correlation")
-        record(results, "relay_track_and_cue_receipt", started, "AAGS 255/190; sensing origin 1")
+        record(results, "capability_gated_addressed_cue_receipt", started,
+               f"AAGS 255/190 to PX4 {VEHICLE_SYSTEM}/1; sensing origin 1")
 
         started = time.monotonic()
         status = px4.status()
@@ -372,33 +476,83 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int) -> dict:
             0,
             0,
             fixed_text("wrong source", 20),
+            int(time.time() * 1_000_000) + 30_000_000,
+            VEHICLE_SYSTEM,
+            VEHICLE_COMPONENT,
+            TRACK_UID.bytes,
         )
         wrong_sender.send(wrong_cue)
         expect_no_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 734)
         record(results, "wrong_packet_source_isolation", started, "254/190 produced no ACK")
 
         started = time.monotonic()
-        changed = make_cue(endpoint, 731, cue_time + 100_000, "changed cue", 454672000)
+        changed = make_cue(endpoint, 731, cue_time + 100_000, cue_expiry, "changed cue", 454672000)
         endpoint.mav.send(changed)
         ack = wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 731)
         assert_ack(ack, dialect.MAVLINK_M_ACK_FAILED, "immutable instance collision")
         record(results, "immutable_cue_collision", started, "changed cue 731 rejected")
 
         started = time.monotonic()
-        cue_two = make_cue(endpoint, 732, cue_time + 200_000, "second cue")
+        endpoint.mav.send(make_handover(endpoint, int(time.time() * 1_000_000)))
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_HANDOVER, 9002),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending",
+        )
+        record(results, "addressed_unique_handover_receipt", started, "handover 9002 stored")
+
+        started = time.monotonic()
+        cancel_message = make_control(
+            endpoint, 3001, dialect.MAVLINK_MSG_ID_TARGET_HANDOVER, 9002,
+            dialect.MAVLINK_M_TASK_CONTROL_CANCEL,
+        )
+        cancel_frame = endpoint.send_frozen(cancel_message)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_MAVLINK_M_TASK_CONTROL, 3001),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "cancelled",
+        )
+        wait_for_task_status(
+            endpoint, dialect.MAVLINK_MSG_ID_TARGET_HANDOVER, 9002,
+            dialect.MAVLINK_M_TASK_STATE_ABORTED,
+        )
+        record(results, "durable_idempotent_cancel", started, "control 3001 and ABORTED status")
+
+        started = time.monotonic()
+        cue_two = make_cue(endpoint, 732, cue_time + 200_000, cue_expiry, "replacement cue")
         endpoint.mav.send(cue_two)
         assert_ack(
             wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 732),
             dialect.MAVLINK_M_ACK_RECEIVED,
             "stored pending",
         )
-        endpoint.mav.send(make_cue(endpoint, 733, cue_time + 300_000, "third cue"))
+        endpoint.mav.send(make_control(
+            endpoint, 3002, dialect.MAVLINK_MSG_ID_TARGET_CUE, 731,
+            dialect.MAVLINK_M_TASK_CONTROL_SUPERSEDE, 732,
+        ))
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_MAVLINK_M_TASK_CONTROL, 3002),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "superseded",
+        )
+        wait_for_task_status(
+            endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 731,
+            dialect.MAVLINK_M_TASK_STATE_ABORTED,
+        )
+        endpoint.mav.send(make_cue(endpoint, 733, cue_time + 300_000, cue_expiry, "second pending"))
         assert_ack(
             wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 733),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending",
+        )
+        endpoint.mav.send(make_cue(endpoint, 734, cue_time + 400_000, cue_expiry, "queue overflow"))
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 734),
             dialect.MAVLINK_M_ACK_FAILED,
             "queue full",
         )
-        record(results, "bounded_inbox", started, "two pending; third rejected")
+        record(results, "supersede_and_bounded_inbox", started,
+               "control 3002; replacement 732 retained; third pending rejected")
 
         started = time.monotonic()
         ignored = 65535
@@ -412,22 +566,13 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int) -> dict:
             ignored, ignored, ignored, ignored, 1800, ignored, ignored, ignored,
         )
         time.sleep(0.4)
-        endpoint.mav.send(cue_one)
+        endpoint.mav.send(cue_two)
         assert_ack(
-            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 731),
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 732),
             dialect.MAVLINK_M_ACK_RECEIVED,
             "duplicate idempotent replay",
         )
         record(results, "remote_rc_override_cannot_accept", started, "cue remained pending")
-
-        started = time.monotonic()
-        endpoint.mav.send(make_handover(endpoint, int(time.time() * 1_000_000)))
-        assert_ack(
-            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_HANDOVER, 0),
-            dialect.MAVLINK_M_ACK_UNSUPPORTED,
-            "lacks approved id/addressing",
-        )
-        record(results, "provisional_handover_fails_closed", started, "UNSUPPORTED instance 0")
 
         state_file = rootfs / "mavlink_m_state.bin"
         if not state_file.is_file() or state_file.stat().st_size == 0:
@@ -437,21 +582,37 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int) -> dict:
         px4.stop()
         drain(endpoint)
         restart_mark = px4.start()
-        wait_for_heartbeat(endpoint)
+        px4.add_test_link()
+        establish_udp_peer(endpoint)
+        if not signed:
+            wait_for_heartbeat(endpoint)
         px4.wait_for("restored MAVLink-M assignment state", restart_mark, 5.0)
-        endpoint.mav.send(cue_one)
+        endpoint.send_capability()
+        time.sleep(0.05)
+        endpoint.mav.send(cue_two)
         assert_ack(
-            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 731),
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 732),
             dialect.MAVLINK_M_ACK_RECEIVED,
             "duplicate idempotent replay",
         )
         restored_status = px4.status()
         if "restored: True" not in restored_status or "track_identity_valid: True" not in restored_status:
             raise AcceptanceFailure("restored normalized state is incomplete\n" + restored_status)
-        record(results, "restart_restore_and_idempotent_replay", started, "pending cue and track UUID restored")
+        if signed:
+            endpoint.mav.send(cancel_message)
+        else:
+            transport.write(cancel_frame)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_MAVLINK_M_TASK_CONTROL, 3001),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "duplicate idempotent control",
+        )
+        record(results, "restart_restore_and_idempotent_replay", started,
+               "pending UUID and control history restored; "
+               + ("fresh signed anti-replay envelope" if signed else "byte-identical frame replay"))
 
         started = time.monotonic()
-        expected = {731, 732}
+        expected = {732, 733}
         expired: set[int] = set()
         deadline = time.monotonic() + max_age + 5.0
         while expected - expired and time.monotonic() < deadline:
@@ -465,16 +626,18 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int) -> dict:
                     expired.add(message.ack_instance)
         if expired != expected:
             raise AcceptanceFailure(f"missing persisted expiry ACKs: {sorted(expected - expired)}")
-        record(results, "durable_local_expiry", started, "cue 731 and 732 expired after restart")
+        record(results, "durable_local_expiry", started, "cue 732 and 733 expired after restart")
 
         return {
             "schema": "px4.aags-mavlink-m.sitl-acceptance.v1",
             "status": "PASS",
-            "profile_id": "aags-handoff-54xxx-core",
-            "profile_version": "handoff-54xxx-2026-07-13",
-            "core_xml_sha256": "8ab02215d036f454bf76fee9d73985fa639f2b8ca9509bf24cc51b0cb35d3b4b",
+            "profile_id": PROFILE_ID,
+            "profile_version": PROFILE_VERSION,
+            "core_xml_sha256": CORE_XML_SHA256,
             "field_release": False,
-            "live_aags_transmit": False,
+            "live_aags_transmit": True,
+            "inert_only": True,
+            "signing_required": signed,
             "tests": results,
         }
     except AcceptanceFailure as error:
@@ -501,6 +664,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--keep-rootfs", action="store_true")
     result.add_argument("--json-output", type=Path)
     result.add_argument("--max-age", type=int, default=12)
+    result.add_argument("--signed", action="store_true",
+                        help="exercise physical mode with a temporary MAVLink 2 signing key")
     return result
 
 
@@ -527,7 +692,7 @@ def main() -> int:
         rootfs = Path(temporary.name)
 
     try:
-        report = run(binary, etc, rootfs, args.max_age)
+        report = run(binary, etc, rootfs, args.max_age, args.signed)
         encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
         if args.json_output:
             args.json_output.parent.mkdir(parents=True, exist_ok=True)

@@ -52,7 +52,7 @@ endif()
 if("${CONFIG_MAVLINK_DIALECT}" STREQUAL "mavlink_m")
 	file(SHA256 "${MAVLINK_GIT_DIR}/message_definitions/v1.0/mavlink_m.xml" MAVLINK_M_CORE_SHA256)
 
-	if(NOT "${MAVLINK_M_CORE_SHA256}" STREQUAL "8ab02215d036f454bf76fee9d73985fa639f2b8ca9509bf24cc51b0cb35d3b4b")
+	if(NOT "${MAVLINK_M_CORE_SHA256}" STREQUAL "699b9b9369180925b06b8b8c4efcb26f1f3323970d9e79ebfa2bef69692ff7a9")
 		message(FATAL_ERROR "AAGS MAVLink-M canonical XML hash mismatch: ${MAVLINK_M_CORE_SHA256}")
 	endif()
 endif()
