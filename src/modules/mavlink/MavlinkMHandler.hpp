@@ -30,6 +30,7 @@
 #include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/topics/input_rc.h>
+#include <uORB/topics/mavlink_m_task_decision.h>
 #include <uORB/topics/mavlink_m_target_status.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_global_position.h>
@@ -171,7 +172,7 @@ private:
 	ControlRecord *find_control(uint32_t control_id);
 	const TrackIdentity *find_track_identity(const Assignment &assignment) const;
 	void apply_track_identity(Assignment &assignment, const TrackIdentity &identity);
-	Assignment *find_pending();
+	Assignment *find_pending(uint32_t message_id = 0, uint32_t instance_id = 0);
 	Assignment *find_free_inbox();
 	void remove_inbox(Assignment *assignment);
 	void remember_terminal(const Assignment &assignment, AssignmentState state, uint8_t result);
@@ -180,9 +181,10 @@ private:
 	void expire_assignments(uint64_t now_usec);
 
 	void update_rc();
+	void update_local_decision();
 	RcPosition classify_rc(uint16_t pwm) const;
-	void accept_pending();
-	void reject_pending_or_abort_active();
+	void accept_pending(uint32_t message_id = 0, uint32_t instance_id = 0);
+	void reject_pending_or_abort_active(uint32_t message_id = 0, uint32_t instance_id = 0);
 
 	void send_ack(const Assignment &assignment, uint8_t result, const char *reason);
 	void send_task_status(const Assignment &assignment, uint8_t state, const char *reason, uint16_t reason_code = 0);
@@ -226,6 +228,7 @@ private:
 	vehicle_attitude_s _attitude{};
 
 	uORB::Subscription _input_rc_sub{ORB_ID(input_rc)};
+	uORB::Subscription _task_decision_sub{ORB_ID(mavlink_m_task_decision)};
 	uORB::Subscription _global_position_sub{ORB_ID(vehicle_global_position)};
 	uORB::Subscription _attitude_sub{ORB_ID(vehicle_attitude)};
 	uORB::Publication<mavlink_m_target_status_s> _status_pub{ORB_ID(mavlink_m_target_status)};
@@ -239,6 +242,7 @@ private:
 	param_t _param_rc_reject{PARAM_INVALID};
 	param_t _param_rc_accept{PARAM_INVALID};
 	param_t _param_max_age{PARAM_INVALID};
+	hrt_abstime _last_task_decision{0};
 
 	int32_t _mode{0};
 	int32_t _link_id{0};

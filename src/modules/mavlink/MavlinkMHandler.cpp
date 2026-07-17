@@ -908,10 +908,12 @@ void MavlinkMHandler::apply_track_identity(Assignment &assignment, const TrackId
 	memcpy(assignment.track_uid, identity.track_uid, sizeof(assignment.track_uid));
 }
 
-MavlinkMHandler::Assignment *MavlinkMHandler::find_pending()
+MavlinkMHandler::Assignment *MavlinkMHandler::find_pending(uint32_t message_id, uint32_t instance_id)
 {
 	for (Assignment &assignment : _inbox) {
-		if (assignment.state == AssignmentState::Pending) {
+		if (assignment.state == AssignmentState::Pending
+		    && (message_id == 0 || assignment.message_id == message_id)
+		    && (instance_id == 0 || assignment.instance_id == instance_id)) {
 			return &assignment;
 		}
 	}
@@ -1022,11 +1024,12 @@ void MavlinkMHandler::promote_queued()
 	}
 }
 
-void MavlinkMHandler::accept_pending()
+void MavlinkMHandler::accept_pending(uint32_t message_id, uint32_t instance_id)
 {
-	Assignment *pending = find_pending();
+	Assignment *pending = find_pending(message_id, instance_id);
 
 	if (pending == nullptr) {
+		PX4_WARN("MAVLink-M accept ignored: no matching pending task");
 		return;
 	}
 
@@ -1065,18 +1068,18 @@ void MavlinkMHandler::accept_pending()
 	Assignment acknowledged = *accepted;
 	acknowledged.last_ack_result = MAVLINK_M_ACK_ACCEPTED;
 	send_ack(acknowledged, MAVLINK_M_ACK_ACCEPTED,
-		 _active.instance_id == decided.instance_id ? "pilot accepted active target" : "pilot accepted queued target");
+		 _active.instance_id == decided.instance_id ? "local operator accepted active target" : "local operator accepted queued target");
 
 	if (_active.instance_id == decided.instance_id) {
-		send_task_status(acknowledged, MAVLINK_M_TASK_STATE_ACTIVE, "pilot accepted observation task");
+		send_task_status(acknowledged, MAVLINK_M_TASK_STATE_ACTIVE, "local operator accepted observation task");
 	}
 
 	publish_status();
 }
 
-void MavlinkMHandler::reject_pending_or_abort_active()
+void MavlinkMHandler::reject_pending_or_abort_active(uint32_t message_id, uint32_t instance_id)
 {
-	Assignment *pending = find_pending();
+	Assignment *pending = find_pending(message_id, instance_id);
 
 	if (pending != nullptr) {
 		Assignment decided = *pending;
@@ -1094,13 +1097,17 @@ void MavlinkMHandler::reject_pending_or_abort_active()
 			return;
 		}
 
-		send_ack(_terminal[0], MAVLINK_M_ACK_REJECTED, "pilot rejected assignment");
-		send_task_status(_terminal[0], MAVLINK_M_TASK_STATE_ABORTED, "pilot rejected observation task");
+		send_ack(_terminal[0], MAVLINK_M_ACK_REJECTED, "local operator rejected assignment");
+		send_task_status(_terminal[0], MAVLINK_M_TASK_STATE_ABORTED, "local operator rejected observation task");
 		publish_status();
 		return;
 	}
 
-	if (_active.state == AssignmentState::Active) {
+	const bool active_matches = _active.state == AssignmentState::Active
+		&& (message_id == 0 || _active.message_id == message_id)
+		&& (instance_id == 0 || _active.instance_id == instance_id);
+
+	if (active_matches) {
 		Assignment decided = _active;
 		++decided.status_sequence;
 		const Assignment active_before = _active;
@@ -1119,8 +1126,8 @@ void MavlinkMHandler::reject_pending_or_abort_active()
 			return;
 		}
 
-		send_ack(_terminal[0], MAVLINK_M_ACK_REJECTED, "pilot aborted active target");
-		send_task_status(_terminal[0], MAVLINK_M_TASK_STATE_ABORTED, "pilot aborted observation task");
+		send_ack(_terminal[0], MAVLINK_M_ACK_REJECTED, "local operator aborted active target");
+		send_task_status(_terminal[0], MAVLINK_M_TASK_STATE_ABORTED, "local operator aborted observation task");
 
 		if (_active.state == AssignmentState::Active) {
 			send_task_status(_active, MAVLINK_M_TASK_STATE_ACTIVE,
@@ -1128,6 +1135,37 @@ void MavlinkMHandler::reject_pending_or_abort_active()
 		}
 
 		publish_status();
+
+	} else {
+		PX4_WARN("MAVLink-M reject ignored: no matching pending or active task");
+	}
+}
+
+void MavlinkMHandler::update_local_decision()
+{
+	mavlink_m_task_decision_s decision{};
+
+	if (!_task_decision_sub.update(&decision)) {
+		return;
+	}
+
+	if (decision.timestamp == 0 || decision.timestamp <= _last_task_decision
+	    || hrt_elapsed_time(&decision.timestamp) > 1'000'000
+	    || decision.target_system != static_cast<uint8_t>(_mavlink->get_system_id())) {
+		PX4_WARN("MAVLink-M ignored stale or misaddressed local decision");
+		return;
+	}
+
+	_last_task_decision = decision.timestamp;
+
+	if (decision.action == mavlink_m_task_decision_s::ACTION_ACCEPT) {
+		accept_pending(decision.task_msgid, decision.task_instance);
+
+	} else if (decision.action == mavlink_m_task_decision_s::ACTION_REJECT) {
+		reject_pending_or_abort_active(decision.task_msgid, decision.task_instance);
+
+	} else {
+		PX4_WARN("MAVLink-M ignored unknown local decision action");
 	}
 }
 
@@ -1499,6 +1537,7 @@ void MavlinkMHandler::update()
 	}
 
 	update_rc();
+	update_local_decision();
 	const hrt_abstime now = hrt_absolute_time();
 	const uint64_t now_usec = utc_now_usec();
 	expire_assignments(now_usec);

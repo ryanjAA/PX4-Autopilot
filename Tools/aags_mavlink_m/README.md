@@ -52,6 +52,19 @@ high accepts the oldest pending task, and low rejects it (or aborts the active
 task when no pending task exists). MAVLink RC override, stale/lost input, and
 failsafe input cannot decide a task.
 
+For headless SITL or a local vehicle console, the same operator decision can be
+made without an RC switch. This publishes only an internal, one-second-lived
+uORB event on that vehicle; it is not a MAVLink command or RC override:
+
+```text
+mavlink task accept
+mavlink task reject
+mavlink task accept 731 54001
+```
+
+The optional instance and message ID pin the decision to one exact pending
+task. A mismatched, stale, or differently addressed decision is ignored.
+
 For unsigned lab use:
 
 ```text
