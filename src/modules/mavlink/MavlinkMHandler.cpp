@@ -24,6 +24,8 @@
 #include "mavlink_m_profile.h"
 #include "mavlink_main.h"
 
+#include <commander/px4_custom_mode.h>
+
 extern "C" {
 #include <lib/crc/crc.h>
 }
@@ -74,8 +76,7 @@ constexpr uint32_t RequiredSourceCapabilities = MAVLINK_M_CAPABILITY_APPLICATION
 		| MAVLINK_M_CAPABILITY_LOCAL_DECISION
 		| MAVLINK_M_CAPABILITY_TASK_STATUS
 		| MAVLINK_M_CAPABILITY_TASK_CONTROL
-		| MAVLINK_M_CAPABILITY_HANDOVER
-		| MAVLINK_M_CAPABILITY_INERT_ONLY;
+		| MAVLINK_M_CAPABILITY_HANDOVER;
 
 #ifdef PX4_STORAGEDIR
 constexpr const char *StatePath = PX4_STORAGEDIR "/mavlink_m_state.bin";
@@ -154,6 +155,7 @@ MavlinkMHandler::MavlinkMHandler(Mavlink *mavlink) :
 	_param_rc_reject = param_find("MAV_M_RC_REJ");
 	_param_rc_accept = param_find("MAV_M_RC_ACC");
 	_param_max_age = param_find("MAV_M_MAX_AGE");
+	_param_action = param_find("MAV_M_ACTION");
 	update_parameters();
 }
 
@@ -178,6 +180,8 @@ void MavlinkMHandler::update_parameters()
 	get_parameter(_param_rc_reject, _rc_reject);
 	get_parameter(_param_rc_accept, _rc_accept);
 	get_parameter(_param_max_age, _max_age_s);
+	get_parameter(_param_action, _action_mask);
+	_action_mask &= CommandAll;
 
 	if (_state_loaded && (previous_instance != _instance
 			       || previous_source_system != _source_system
@@ -694,12 +698,14 @@ void MavlinkMHandler::handle_task_control(const mavlink_message_t &message)
 	send_ack(response, result, reason);
 
 	if (send_aborted_status) {
+		(void)cancel_assignment_commands(status_assignment);
 		send_task_status(status_assignment, MAVLINK_M_TASK_STATE_ABORTED, reason, control.reason_code);
 	}
 
 	if (_active.state == AssignmentState::Active
 	    && (_active.instance_id != active_before.instance_id
 		|| _active.message_id != active_before.message_id)) {
+		(void)command_active_assignment();
 		send_task_status(_active, MAVLINK_M_TASK_STATE_ACTIVE,
 				 "previous task ended; accepted queued task is active");
 	}
@@ -728,8 +734,8 @@ void MavlinkMHandler::handle_task_status(const mavlink_message_t &message)
 	const char *reason = nullptr;
 	uint8_t result = MAVLINK_M_ACK_FAILED;
 	(void)validate_time(status.time_usec, 0, &reason, &result);
-	// Remote status is deliberately informational. It never mutates local pilot
-	// decisions, navigation state, flight mode, arming state, or payload state.
+	// Remote status is informational. Command authority is driven only by local
+	// acceptance of exact-addressed assignments and MAV_M_ACTION.
 }
 
 bool MavlinkMHandler::validate_common(const Assignment &assignment, const char **reason, uint8_t *ack_result) const
@@ -1071,6 +1077,7 @@ void MavlinkMHandler::accept_pending(uint32_t message_id, uint32_t instance_id)
 		 _active.instance_id == decided.instance_id ? "local operator accepted active target" : "local operator accepted queued target");
 
 	if (_active.instance_id == decided.instance_id) {
+		(void)command_active_assignment();
 		send_task_status(acknowledged, MAVLINK_M_TASK_STATE_ACTIVE, "local operator accepted observation task");
 	}
 
@@ -1127,9 +1134,11 @@ void MavlinkMHandler::reject_pending_or_abort_active(uint32_t message_id, uint32
 		}
 
 		send_ack(_terminal[0], MAVLINK_M_ACK_REJECTED, "local operator aborted active target");
+		(void)cancel_assignment_commands(_terminal[0]);
 		send_task_status(_terminal[0], MAVLINK_M_TASK_STATE_ABORTED, "local operator aborted observation task");
 
 		if (_active.state == AssignmentState::Active) {
+			(void)command_active_assignment();
 			send_task_status(_active, MAVLINK_M_TASK_STATE_ACTIVE,
 					 "previous task ended; accepted queued task is active");
 		}
@@ -1230,6 +1239,131 @@ void MavlinkMHandler::update_rc()
 	_last_rc_position = position;
 }
 
+bool MavlinkMHandler::command_enabled(uint8_t command) const
+{
+	return (_action_mask & command) != 0;
+}
+
+bool MavlinkMHandler::publish_vehicle_command(const Assignment &assignment, uint32_t command, float param1,
+		float param2, float param3, float param4, double param5, double param6, float param7,
+		uint8_t target_component)
+{
+	if (_mavlink == nullptr || assignment.source_system == 0 || assignment.source_component == 0) {
+		return false;
+	}
+
+	vehicle_command_s vehicle_command{};
+	vehicle_command.timestamp = hrt_absolute_time();
+	vehicle_command.command = command;
+	vehicle_command.param1 = param1;
+	vehicle_command.param2 = param2;
+	vehicle_command.param3 = param3;
+	vehicle_command.param4 = param4;
+	vehicle_command.param5 = param5;
+	vehicle_command.param6 = param6;
+	vehicle_command.param7 = param7;
+	vehicle_command.target_system = static_cast<uint8_t>(_mavlink->get_system_id());
+	vehicle_command.target_component = target_component == CommandTargetLocalComponent
+					   ? static_cast<uint8_t>(_mavlink->get_component_id())
+					   : target_component;
+	vehicle_command.source_system = assignment.source_system;
+	vehicle_command.source_component = assignment.source_component;
+	vehicle_command.from_external = true;
+
+	return _vehicle_command_pub.publish(vehicle_command);
+}
+
+bool MavlinkMHandler::command_payload_roi(const Assignment &assignment)
+{
+	const double target_lat = assignment.lat * 1e-7;
+	const double target_lon = assignment.lon * 1e-7;
+	const float target_alt = PX4_ISFINITE(assignment.alt) ? assignment.alt : NAN;
+
+	const bool roi_sent = publish_vehicle_command(assignment, vehicle_command_s::VEHICLE_CMD_DO_SET_ROI_LOCATION,
+			      NAN, NAN, NAN, NAN, target_lat, target_lon, target_alt);
+	const bool mount_sent = publish_vehicle_command(assignment, vehicle_command_s::VEHICLE_CMD_DO_MOUNT_CONTROL,
+				NAN, NAN, NAN, target_alt, target_lat, target_lon,
+				static_cast<float>(vehicle_command_s::VEHICLE_MOUNT_MODE_GPS_POINT));
+
+	return roi_sent && mount_sent;
+}
+
+bool MavlinkMHandler::command_active_assignment()
+{
+	if (_active.state != AssignmentState::Active || _action_mask == 0) {
+		return false;
+	}
+
+	uint8_t issued = 0;
+	const double target_lat = _active.lat * 1e-7;
+	const double target_lon = _active.lon * 1e-7;
+	const float target_alt = PX4_ISFINITE(_active.alt) ? _active.alt : NAN;
+
+	if (command_enabled(CommandArm) && (_active.command_flags & CommandArm) == 0
+	    && publish_vehicle_command(_active, vehicle_command_s::VEHICLE_CMD_COMPONENT_ARM_DISARM,
+				       static_cast<float>(vehicle_command_s::ARMING_ACTION_ARM), 0.f)) {
+		issued |= CommandArm;
+	}
+
+	if (command_enabled(CommandMode) && (_active.command_flags & CommandMode) == 0
+	    && publish_vehicle_command(_active, vehicle_command_s::VEHICLE_CMD_DO_SET_MODE,
+				       static_cast<float>(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED),
+				       static_cast<float>(PX4_CUSTOM_MAIN_MODE_AUTO),
+				       static_cast<float>(PX4_CUSTOM_SUB_MODE_AUTO_LOITER))) {
+		issued |= CommandMode;
+	}
+
+	if (command_enabled(CommandNav) && (_active.command_flags & CommandNav) == 0
+	    && publish_vehicle_command(_active, vehicle_command_s::VEHICLE_CMD_DO_REPOSITION,
+				       NAN, 1.f, NAN, NAN, target_lat, target_lon, target_alt)) {
+		issued |= CommandNav;
+	}
+
+	if (command_enabled(CommandPayload) && (_active.command_flags & CommandPayload) == 0
+	    && command_payload_roi(_active)) {
+		issued |= CommandPayload;
+	}
+
+	if (issued != 0) {
+		_active.command_flags |= issued;
+
+		if (!save_state()) {
+			PX4_WARN("MAVLink-M command state was not persisted");
+		}
+
+		publish_status();
+	}
+
+	return issued != 0;
+}
+
+bool MavlinkMHandler::cancel_assignment_commands(const Assignment &assignment)
+{
+	if (_action_mask == 0 || assignment.command_flags == 0) {
+		return false;
+	}
+
+	bool sent = false;
+
+	if ((assignment.command_flags & CommandPayload) != 0 && command_enabled(CommandPayload)) {
+		sent = publish_vehicle_command(assignment, vehicle_command_s::VEHICLE_CMD_DO_SET_ROI_NONE) || sent;
+		sent = publish_vehicle_command(assignment, vehicle_command_s::VEHICLE_CMD_DO_MOUNT_CONTROL,
+					       NAN, NAN, NAN, NAN, static_cast<double>(NAN), static_cast<double>(NAN),
+					       static_cast<float>(vehicle_command_s::VEHICLE_MOUNT_MODE_NEUTRAL)) || sent;
+	}
+
+	if ((assignment.command_flags & CommandNav) != 0 && command_enabled(CommandNav)
+	    && _global_position.timestamp != 0 && hrt_elapsed_time(&_global_position.timestamp) < 2'000'000
+	    && PX4_ISFINITE(_global_position.lat) && PX4_ISFINITE(_global_position.lon)
+	    && PX4_ISFINITE(_global_position.alt)) {
+		sent = publish_vehicle_command(assignment, vehicle_command_s::VEHICLE_CMD_DO_REPOSITION,
+					       NAN, 1.f, NAN, NAN, _global_position.lat, _global_position.lon,
+					       _global_position.alt) || sent;
+	}
+
+	return sent;
+}
+
 void MavlinkMHandler::expire_assignments(uint64_t now_usec)
 {
 	if (now_usec < Unix2020Usec) {
@@ -1285,6 +1419,7 @@ void MavlinkMHandler::expire_assignments(uint64_t now_usec)
 		} else {
 			for (unsigned i = 0; i < expired_count; ++i) {
 				send_ack(expired_assignments[i], MAVLINK_M_ACK_EXPIRED, "assignment expired");
+				(void)cancel_assignment_commands(expired_assignments[i]);
 				send_task_status(expired_assignments[i], MAVLINK_M_TASK_STATE_EXPIRED,
 						 "observation task expired");
 			}
@@ -1292,6 +1427,7 @@ void MavlinkMHandler::expire_assignments(uint64_t now_usec)
 			if (_active.state == AssignmentState::Active
 			    && (_active.instance_id != active_before.instance_id
 				|| _active.message_id != active_before.message_id)) {
+				(void)command_active_assignment();
 				send_task_status(_active, MAVLINK_M_TASK_STATE_ACTIVE,
 						 "previous task expired; accepted queued task is active");
 			}
@@ -1366,8 +1502,7 @@ void MavlinkMHandler::send_capability()
 				      | MAVLINK_M_CAPABILITY_LOCAL_DECISION
 				      | MAVLINK_M_CAPABILITY_TASK_STATUS
 				      | MAVLINK_M_CAPABILITY_TASK_CONTROL
-				      | MAVLINK_M_CAPABILITY_HANDOVER
-				      | MAVLINK_M_CAPABILITY_INERT_ONLY;
+				      | MAVLINK_M_CAPABILITY_HANDOVER;
 
 	if (signing_required()) {
 		capability.capability_flags |= MAVLINK_M_CAPABILITY_SIGNING_REQUIRED;
@@ -1541,6 +1676,7 @@ void MavlinkMHandler::update()
 	const hrt_abstime now = hrt_absolute_time();
 	const uint64_t now_usec = utc_now_usec();
 	expire_assignments(now_usec);
+	(void)command_active_assignment();
 
 	if (_last_capability_send == 0 || now - _last_capability_send >= CapabilityInterval) {
 		send_capability();

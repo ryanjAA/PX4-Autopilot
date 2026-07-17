@@ -12,13 +12,14 @@ depends on MODULES_MAVLINK
 		Select the Mavlink dialect to generate and use.
 
 config MAVLINK_M_PRIVATE_PROFILE
-	bool "Private inert AAGS MAVLink-M endpoint"
+	bool "Private AAGS MAVLink-M endpoint"
 	default n
 	depends on MODULES_MAVLINK
 	---help---
-		Compile the owner-authorized private inert-development MAVLink-M
-		endpoint. The board must also select the mavlink_m dialect. Runtime
-		operation remains fail-closed until MAV_M_MODE is explicitly enabled.
+		Compile the owner-authorized private MAVLink-M endpoint. The board
+		must also select the mavlink_m dialect. Runtime operation remains
+		fail-closed until MAV_M_MODE is explicitly enabled. Vehicle command
+		authority remains disabled until MAV_M_ACTION is explicitly set.
 
 menuconfig MAVLINK_UAVCAN_PARAMETERS
 depends on MODULES_MAVLINK && DRIVERS_UAVCAN

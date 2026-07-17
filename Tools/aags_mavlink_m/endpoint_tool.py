@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send and inspect the exact AAGS MAVLink-M 54xxx development profile.
+"""Send and inspect the exact AAGS MAVLink-M 54xxx command profile.
 
 The utility generates a Python binding from the dialect checked into this PX4
 tree, so its wire layout cannot silently drift to a system pymavlink dialect.
@@ -23,8 +23,8 @@ import time
 import uuid
 
 
-PROFILE_ID = "aags-private-inert-54xxx"
-PROFILE_VERSION = "private-inert-2026-07-16-v1"
+PROFILE_ID = "aags-private-command-54xxx"
+PROFILE_VERSION = "private-command-2026-07-17-v2"
 CORE_XML_SHA256 = "699b9b9369180925b06b8b8c4efcb26f1f3323970d9e79ebfa2bef69692ff7a9"
 PROFILE_SHA256 = bytes.fromhex(CORE_XML_SHA256)
 ACK_NAMES = {
@@ -174,7 +174,6 @@ class Endpoint:
             | self.dialect.MAVLINK_M_CAPABILITY_TASK_STATUS
             | self.dialect.MAVLINK_M_CAPABILITY_TASK_CONTROL
             | self.dialect.MAVLINK_M_CAPABILITY_HANDOVER
-            | self.dialect.MAVLINK_M_CAPABILITY_INERT_ONLY
         )
         if self.mav.signing.sign_outgoing:
             flags |= self.dialect.MAVLINK_M_CAPABILITY_SIGNING_REQUIRED
@@ -399,7 +398,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="additional byte-identical retries after ACK timeout")
 
     commands = parser.add_subparsers(dest="command", required=True)
-    cue = commands.add_parser("cue", help="send a non-kinetic TARGET_CUE")
+    cue = commands.add_parser("cue", help="send an addressed TARGET_CUE")
     add_target_arguments(cue, require_alt=False)
     cue.add_argument("--target-set", type=int, default=0)
     cue.add_argument(
@@ -428,9 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
     track.add_argument("--environment", type=int, choices=range(0, 6), default=0)
     track.add_argument("--sidc-context", type=int, choices=range(0, 3), default=0)
 
-    handover = commands.add_parser(
-        "handover", help="negative probe; PX4 must return UNSUPPORTED for this provisional message"
-    )
+    handover = commands.add_parser("handover", help="send an addressed TARGET_HANDOVER")
     add_target_arguments(handover, require_alt=True)
     handover.add_argument("--valid-for", type=float, default=30.0, help="validity duration, seconds")
     handover.add_argument("--target-set", type=int, default=0)

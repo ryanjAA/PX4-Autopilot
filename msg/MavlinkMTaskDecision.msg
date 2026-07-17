@@ -1,6 +1,6 @@
-# Local operator decision for one private inert MAVLink-M task.
-# This is an internal uORB event. It is never decoded from MAVLink and never
-# commands navigation, arming, flight mode, actuators, or payload state.
+# Local operator decision for one private MAVLink-M task.
+# This is an internal uORB event. Vehicle command authority after acceptance is
+# controlled separately by MAV_M_ACTION.
 
 # Keep short-lived shell/UI publishers advertised until the MAVLink instance
 # consumes the decision, and bound bursts of local operator input.

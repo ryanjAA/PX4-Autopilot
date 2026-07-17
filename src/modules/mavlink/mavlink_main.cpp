@@ -3318,7 +3318,7 @@ $ mavlink stream -u 14556 -s HIGHRES_IMU -r 50
 					 "Enable sending of messages. (Must be) called as last step in startup script.");
 #if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 	PRINT_MODULE_USAGE_COMMAND_DESCR("task",
-					 "Local private-inert task decision: task {accept|reject} [task_instance] [task_msgid]");
+					 "Local private task decision: task {accept|reject} [task_instance] [task_msgid]");
 #endif
 
 }

@@ -179,7 +179,7 @@ static WireFrame make_capability(void)
         MAVLINK_M_CAPABILITY_CUE_RECEIVE | MAVLINK_M_CAPABILITY_APPLICATION_RECEIPT
             | MAVLINK_M_CAPABILITY_LOCAL_DECISION | MAVLINK_M_CAPABILITY_TASK_STATUS
             | MAVLINK_M_CAPABILITY_TASK_CONTROL | MAVLINK_M_CAPABILITY_HANDOVER
-            | MAVLINK_M_CAPABILITY_SIGNING_REQUIRED | MAVLINK_M_CAPABILITY_INERT_ONLY,
+            | MAVLINK_M_CAPABILITY_SIGNING_REQUIRED,
         MAVLINK_M_ENDPOINT_PX4_PILOT, 42, 191,
         AAGS_MAVLINK_M_PROTOCOL_MAJOR, AAGS_MAVLINK_M_PROTOCOL_MINOR,
         ProfileSha256, AAGS_MAVLINK_M_PROFILE_ID, AAGS_MAVLINK_M_PROFILE_VERSION);
@@ -276,22 +276,22 @@ static int emit_golden(void)
     printf("  \"core_xml_sha256\":\"%s\",\n", AAGS_MAVLINK_M_CORE_XML_SHA256);
     printf("  \"live_transmit\":true,\n");
     printf("  \"field_release\":false,\n");
-    printf("  \"inert_only\":true,\n");
+    printf("  \"inert_only\":false,\n");
     printf("  \"vectors\":[\n");
     print_vector("track_identity_nominal", &track, MAVLINK_MSG_ID_TRACK_IDENTITY,
         "persistent identity record; no engagement authority", false);
     print_vector("target_cue_nominal_addressed", &cue, MAVLINK_MSG_ID_TARGET_CUE,
-        "private inert cue addressed to system 42 component 191", false);
+        "private cue addressed to system 42 component 191", false);
     print_vector("target_handover_nominal_addressed", &handover, MAVLINK_MSG_ID_TARGET_HANDOVER,
-        "private inert handover 9002 addressed to system 42 component 191", false);
+        "private handover 9002 addressed to system 42 component 191", false);
     print_vector("mavlink_m_ack_nominal_addressed", &ack, MAVLINK_MSG_ID_MAVLINK_M_ACK,
         "ack_msgid 54001 instance 731 addressed to system 1 component 191", false);
     print_vector("task_status_active", &status, MAVLINK_MSG_ID_MAVLINK_M_TASK_STATUS,
-        "explicit task lifecycle status; no vehicle-control implication", false);
+        "explicit task lifecycle status", false);
     print_vector("task_control_supersede", &control, MAVLINK_MSG_ID_MAVLINK_M_TASK_CONTROL,
         "idempotent supersede control 3001 naming replacement 732", false);
-    print_vector("capability_private_inert", &capability, MAVLINK_MSG_ID_MAVLINK_M_CAPABILITY,
-        "fresh exact-hash private inert endpoint advertisement", true);
+    print_vector("capability_private_command", &capability, MAVLINK_MSG_ID_MAVLINK_M_CAPABILITY,
+        "fresh exact-hash private endpoint advertisement", true);
     printf("  ]\n");
     printf("}\n");
     return 0;
@@ -398,7 +398,7 @@ static int self_test(void)
     printf("exact_nonzero_addressing=PASS\n");
     printf("unique_handover_and_task_lifecycle=PASS\n");
     printf("mavlink2_signing_roundtrip=PASS\n");
-    printf("private_inert_live_transport_authorized=PASS\n");
+    printf("private_live_transport_authorized=PASS\n");
     return 0;
 }
 

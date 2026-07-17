@@ -1,15 +1,15 @@
-# Private inert AAGS ↔ PX4 MAVLink-M profile
+# Private AAGS to PX4 MAVLink-M command profile
 
-This branch implements the owner-authorized private development profile in
-both AAGS and PX4. It is for inert development and real-environment observation
-testing only. It does not publish navigation setpoints, missions, vehicle
-commands, flight-mode or arming commands, actuator commands, or payload
-commands, and it does not claim partner or field approval.
+This branch implements the owner-authorized private command profile in
+both AAGS and PX4. It supports live cue and handover transport. PX4 can also
+publish navigation, flight-mode, arming, and payload ROI vehicle commands after
+the task has been durably received, locally accepted, and made active. Command
+authority is disabled by default and controlled by `MAV_M_ACTION`.
 
 Profile identity:
 
-- ID: `aags-private-inert-54xxx`
-- version: `private-inert-2026-07-16-v1`
+- ID: `aags-private-command-54xxx`
+- version: `private-command-2026-07-17-v2`
 - canonical XML SHA-256:
   `699b9b9369180925b06b8b8c4efcb26f1f3323970d9e79ebfa2bef69692ff7a9`
 - provisional private IDs: `54000` through `54007`
@@ -44,14 +44,15 @@ ordinary `common` dialect unless their defconfig explicitly selects both
 `CONFIG_MAVLINK_M_PRIVATE_PROFILE=y`.
 
 Selecting the endpoint at build time does not enable it at runtime:
-`MAV_M_MODE=0` remains the fail-closed default on SITL and ARK v6X.
+`MAV_M_MODE=0` remains the fail-closed default on SITL and ARK v6X. Command
+authority also remains disabled until `MAV_M_ACTION` is set.
 
 ## PX4 configuration
 
 `MAV_M_MODE=0` is the default and ignores all private task traffic.
 
-- `MAV_M_MODE=1`: private inert lab mode, unsigned.
-- `MAV_M_MODE=2`: private inert physical-link mode. MAVLink 2 signing is
+- `MAV_M_MODE=1`: private lab mode, unsigned.
+- `MAV_M_MODE=2`: private physical-link mode. MAVLink 2 signing is
   mandatory for every frame on the selected link.
 
 Configure the exact MAVLink instance and AAGS packet source before enabling:
@@ -65,6 +66,7 @@ param set MAV_M_RC_CH 5
 param set MAV_M_RC_REJ 1300
 param set MAV_M_RC_ACC 1700
 param set MAV_M_MAX_AGE 30
+param set MAV_M_ACTION 0
 param save
 ```
 
@@ -89,6 +91,28 @@ mavlink task accept 731 54001
 
 The optional instance and message ID pin the decision to one exact pending
 task. A mismatched, stale, or differently addressed decision is ignored.
+
+To let an accepted active task command the vehicle, set `MAV_M_ACTION` to the
+sum of the required bits:
+
+- `1`: publish `VEHICLE_CMD_DO_REPOSITION` to the accepted target.
+- `2`: publish `VEHICLE_CMD_DO_SET_MODE` to `AUTO_LOITER`.
+- `4`: publish `VEHICLE_CMD_COMPONENT_ARM_DISARM` with arm and normal checks.
+- `8`: publish payload ROI and mount GPS-point commands to the target.
+
+For the full next-phase behavior requested here:
+
+```text
+param set MAV_M_ACTION 15
+param save
+reboot
+```
+
+Cancel, reject, supersede, and expiry clear payload ROI when payload authority
+was used. If navigation authority was used and a fresh global position is
+available, PX4 also sends a reposition command to the current position so the
+guided target does not remain pointed at the cancelled task. Cancel does not
+auto-disarm.
 
 For unsigned lab use:
 
@@ -150,14 +174,14 @@ make -j4
 ```
 
 In the cue composer, select an exact destination and link, choose either an
-observation action or `Handover / transfer`, and complete the final inert
-live-send confirmation. The task roster shows receipts and explicit lifecycle
-status. `CANCEL` sends an idempotent addressed control. The network inbox can
+observation action or `Handover / transfer`, and complete the live-send
+confirmation. The task roster shows receipts and explicit lifecycle status.
+`CANCEL` sends an idempotent addressed control. The network inbox can
 accept/reject incoming cues or handovers and report READY, COMPLETE, or ABORT.
 
 Capability advertisements are emitted every five seconds. A task is not sent
 or accepted without a fresh advertisement matching the exact profile hash,
-version, signing policy, and inert capabilities.
+version, signing policy, and required capabilities.
 
 ## Bench command-line probe
 
@@ -208,5 +232,5 @@ Tools/aags_mavlink_m/run_sitl_acceptance.py --signed \
 The suite uses an isolated PX4 instance and UDP link, exercises cue, handover,
 cancel, supersede, status, wrong-source isolation, persistence/restart,
 bounded inbox behavior, RC-override rejection, expiry, and signing, and emits a
-machine-readable report. Physical RC/failsafe behavior and the exact installed
-hardware target still require an inert bench acceptance before use.
+machine-readable report. Physical RC/failsafe behavior, command authority, and
+the exact installed hardware target still require bench acceptance before use.

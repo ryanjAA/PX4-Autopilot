@@ -1,5 +1,5 @@
-# Safe, display-oriented state for one MAVLink-M cue/handover endpoint.
-# This topic never commands navigation, arming, flight mode, or payload state.
+# Display and local state for one MAVLink-M cue/handover endpoint.
+# Vehicle command authority is controlled separately by MAV_M_ACTION.
 
 uint64 timestamp
 uint64 assignment_time_usec

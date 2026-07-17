@@ -159,16 +159,16 @@ PARAM_DEFINE_INT32(MAV_RADIO_TOUT, 5);
 /**
  * MAVLink-M endpoint mode
  *
- * Private inert-development traffic is accepted only on the selected MAVLink
- * instance, from the exact source endpoint, after a fresh matching capability
- * advertisement, and when the payload names this PX4 system and component.
- * Mode 2 additionally requires a valid 32-byte MAVLink 2 signing key at
+ * Private task traffic is accepted only on the selected MAVLink instance, from
+ * the exact source endpoint, after a fresh matching capability advertisement,
+ * and when the payload names this PX4 system and component. Mode 2 additionally
+ * requires a valid 32-byte MAVLink 2 signing key at
  * PX4_STORAGEDIR/mavlink_m_signing.key and rejects every unsigned frame on the
  * selected physical task link.
  *
  * @value 0 Disabled (fail closed)
- * @value 1 Private inert lab transport (unsigned)
- * @value 2 Private inert physical transport (signing required)
+ * @value 1 Private lab transport (unsigned)
+ * @value 2 Private physical transport (signing required)
  * @group MAVLink-M
  * @reboot_required true
  */
@@ -267,3 +267,23 @@ PARAM_DEFINE_INT32(MAV_M_RC_ACC, 1700);
  * @max 600
  */
 PARAM_DEFINE_INT32(MAV_M_MAX_AGE, 30);
+
+/**
+ * Accepted-task command authority
+ *
+ * Bitmask of vehicle commands PX4 may publish after a MAVLink-M cue or
+ * handover has been durably stored, locally accepted, and made active.
+ * Zero keeps the endpoint receipt/status only. Bit 1 publishes
+ * DO_REPOSITION to the accepted target. Bit 2 publishes DO_SET_MODE
+ * AUTO_LOITER. Bit 4 publishes COMPONENT_ARM_DISARM arm without force.
+ * Bit 8 publishes payload ROI and mount GPS-point commands to the target.
+ *
+ * @group MAVLink-M
+ * @min 0
+ * @max 15
+ * @bit 0 Navigation reposition
+ * @bit 1 Flight mode
+ * @bit 2 Arm
+ * @bit 3 Payload ROI
+ */
+PARAM_DEFINE_INT32(MAV_M_ACTION, 0);

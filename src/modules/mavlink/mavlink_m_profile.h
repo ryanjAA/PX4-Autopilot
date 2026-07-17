@@ -2,15 +2,15 @@
 
 // Byte-exact profile identity shared with the implemented AAGS branch.
 #define AAGS_MAVLINK_M_ENABLED 1
-#define AAGS_MAVLINK_M_PROFILE_ID "aags-private-inert-54xxx"
-#define AAGS_MAVLINK_M_PROFILE_VERSION "private-inert-2026-07-16-v1"
+#define AAGS_MAVLINK_M_PROFILE_ID "aags-private-command-54xxx"
+#define AAGS_MAVLINK_M_PROFILE_VERSION "private-command-2026-07-17-v2"
 #define AAGS_MAVLINK_M_CORE_XML_SHA256 "699b9b9369180925b06b8b8c4efcb26f1f3323970d9e79ebfa2bef69692ff7a9"
 #define AAGS_MAVLINK_M_EXTENSIONS_XML_SHA256 "d05ea8e6c9dfb85f0262606d05d3f628ec9f4b35e4516c8fb2dab49aecc02d38"
 #define AAGS_MAVLINK_M_ID_MAPPING_SHA256 "f03eed33841f1f15180d684a401d7dd0cb3806eb5d06ffd6509cc1bbbd9e620e"
 #define AAGS_MAVLINK_M_GENERATOR "pymavlink-2.4.49/python-3.9/PYTHONHASHSEED-0"
-#define AAGS_MAVLINK_M_APPROVAL_STATE "owner-authorized-private-development"
+#define AAGS_MAVLINK_M_APPROVAL_STATE "owner-authorized-private-command"
 #define AAGS_MAVLINK_M_FIELD_RELEASE 0
 #define AAGS_MAVLINK_M_LIVE_TRANSPORT 1
-#define AAGS_MAVLINK_M_INERT_ONLY 1
+#define AAGS_MAVLINK_M_INERT_ONLY 0
 #define AAGS_MAVLINK_M_PROTOCOL_MAJOR 1
 #define AAGS_MAVLINK_M_PROTOCOL_MINOR 0

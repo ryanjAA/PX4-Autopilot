@@ -33,16 +33,17 @@
 #include <uORB/topics/mavlink_m_task_decision.h>
 #include <uORB/topics/mavlink_m_target_status.h>
 #include <uORB/topics/vehicle_attitude.h>
+#include <uORB/topics/vehicle_command.h>
 #include <uORB/topics/vehicle_global_position.h>
 
 class Mavlink;
 
 /**
- * Safe endpoint for the owner-authorized private inert MAVLink-M profile.
+ * Endpoint for the owner-authorized private MAVLink-M profile.
  *
  * Every task/control packet is exact-addressed, source/link bound, capability
- * gated, durable before receipt, and isolated from navigation, flight mode,
- * arming, actuator, and payload command paths.
+ * gated, and durable before receipt. Optional vehicle command authority is
+ * separately parameter-gated and only runs after local task acceptance.
  */
 class MavlinkMHandler
 {
@@ -99,6 +100,7 @@ private:
 		AssignmentState state{AssignmentState::Empty};
 		uint8_t last_ack_result{0}; // MAVLINK_M_ACK_RECEIVED
 		uint8_t restored{0};
+		uint8_t command_flags{0};
 	};
 
 	struct ControlRecord {
@@ -141,13 +143,19 @@ private:
 	};
 
 	static constexpr uint32_t PersistenceMagic = 0x4d534741; // "AGSM"
-	static constexpr uint16_t PersistenceVersion = 4;
+	static constexpr uint16_t PersistenceVersion = 5;
 	static constexpr unsigned InboxCapacity = 2;
 	static constexpr unsigned TerminalCapacity = 8;
 	static constexpr unsigned TrackIdentityCapacity = 4;
 	static constexpr unsigned ControlCapacity = 8;
 	static constexpr hrt_abstime SourceFreshTimeout = 15'000'000;
 	static constexpr hrt_abstime CapabilityInterval = 5'000'000;
+	static constexpr uint8_t CommandNav = 1 << 0;
+	static constexpr uint8_t CommandMode = 1 << 1;
+	static constexpr uint8_t CommandArm = 1 << 2;
+	static constexpr uint8_t CommandPayload = 1 << 3;
+	static constexpr uint8_t CommandAll = CommandNav | CommandMode | CommandArm | CommandPayload;
+	static constexpr uint8_t CommandTargetLocalComponent = 255;
 
 	bool enabled() const;
 	bool signing_required() const;
@@ -185,6 +193,14 @@ private:
 	RcPosition classify_rc(uint16_t pwm) const;
 	void accept_pending(uint32_t message_id = 0, uint32_t instance_id = 0);
 	void reject_pending_or_abort_active(uint32_t message_id = 0, uint32_t instance_id = 0);
+	bool command_enabled(uint8_t command) const;
+	bool publish_vehicle_command(const Assignment &assignment, uint32_t command, float param1 = NAN, float param2 = NAN,
+				      float param3 = NAN, float param4 = NAN, double param5 = static_cast<double>(NAN),
+				      double param6 = static_cast<double>(NAN),
+				      float param7 = NAN, uint8_t target_component = CommandTargetLocalComponent);
+	bool command_active_assignment();
+	bool command_payload_roi(const Assignment &assignment);
+	bool cancel_assignment_commands(const Assignment &assignment);
 
 	void send_ack(const Assignment &assignment, uint8_t result, const char *reason);
 	void send_task_status(const Assignment &assignment, uint8_t state, const char *reason, uint16_t reason_code = 0);
@@ -232,6 +248,7 @@ private:
 	uORB::Subscription _global_position_sub{ORB_ID(vehicle_global_position)};
 	uORB::Subscription _attitude_sub{ORB_ID(vehicle_attitude)};
 	uORB::Publication<mavlink_m_target_status_s> _status_pub{ORB_ID(mavlink_m_target_status)};
+	uORB::Publication<vehicle_command_s> _vehicle_command_pub{ORB_ID(vehicle_command)};
 
 	param_t _param_mode{PARAM_INVALID};
 	param_t _param_link_id{PARAM_INVALID};
@@ -242,6 +259,7 @@ private:
 	param_t _param_rc_reject{PARAM_INVALID};
 	param_t _param_rc_accept{PARAM_INVALID};
 	param_t _param_max_age{PARAM_INVALID};
+	param_t _param_action{PARAM_INVALID};
 	hrt_abstime _last_task_decision{0};
 
 	int32_t _mode{0};
@@ -253,4 +271,5 @@ private:
 	int32_t _rc_reject{1300};
 	int32_t _rc_accept{1700};
 	int32_t _max_age_s{30};
+	int32_t _action_mask{0};
 };

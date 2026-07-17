@@ -2,9 +2,8 @@
 """Run the live UDP AAGS MAVLink-M acceptance suite against PX4 SITL.
 
 This starts the already-built PX4 binary in an isolated rootfs, configures the
-private inert endpoint, exchanges exactly addressed MAVLink 2 datagrams,
-restarts PX4 against the same durable state, and reports machine-readable
-results. It never commands navigation, flight mode, arming, or payloads.
+private endpoint, exchanges exactly addressed MAVLink 2 datagrams, restarts
+PX4 against the same durable state, and reports machine-readable results.
 """
 
 from __future__ import annotations
@@ -35,8 +34,8 @@ TEST_PX4_UDP_PORT = 18671
 TEST_AAGS_UDP_PORT = 14551
 TRACK_SET = 45
 TRACK_UID = uuid.UUID("00112233-4455-6677-8899-aabbccddeeff")
-PROFILE_ID = "aags-private-inert-54xxx"
-PROFILE_VERSION = "private-inert-2026-07-16-v1"
+PROFILE_ID = "aags-private-command-54xxx"
+PROFILE_VERSION = "private-command-2026-07-17-v2"
 CORE_XML_SHA256 = "699b9b9369180925b06b8b8c4efcb26f1f3323970d9e79ebfa2bef69692ff7a9"
 SIGNING_KEY = bytes(range(32))
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -132,6 +131,7 @@ class Px4Sitl:
             "param set MAV_M_RC_REJ 1300",
             "param set MAV_M_RC_ACC 1700",
             f"param set MAV_M_MAX_AGE {max_age}",
+            "param set MAV_M_ACTION 0",
             "param save",
         ]
         for command in commands:
@@ -146,6 +146,7 @@ class Px4Sitl:
             "MAV_M_SRC_SYS": SOURCE_SYSTEM,
             "MAV_M_SRC_CMP": SOURCE_COMPONENT,
             "MAV_M_MAX_AGE": max_age,
+            "MAV_M_ACTION": 0,
         }
         missing = [
             f"{name}={value}"
@@ -219,7 +220,7 @@ def wait_for_px4_capability(endpoint: Endpoint, timeout: float = 7.0):
                 and message.endpoint_type == endpoint.dialect.MAVLINK_M_ENDPOINT_PX4_PILOT
             ):
                 return message
-    raise AcceptanceFailure("PX4 did not advertise the private inert capability")
+    raise AcceptanceFailure("PX4 did not advertise the private capability")
 
 
 def drain(endpoint: Endpoint, duration: float = 0.25) -> None:
@@ -357,7 +358,7 @@ def make_control(endpoint: Endpoint, control_id: int, task_msgid: int,
     return endpoint.mav.mavlink_m_task_control_encode(
         int(time.time() * 1_000_000), task_msgid, task_instance, control_id,
         replacement_instance, 0, VEHICLE_SYSTEM, VEHICLE_COMPONENT, action,
-        fixed_text("SITL inert control", 40),
+        fixed_text("SITL command control", 40),
     )
 
 
@@ -636,7 +637,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             "core_xml_sha256": CORE_XML_SHA256,
             "field_release": False,
             "live_aags_transmit": True,
-            "inert_only": True,
+            "inert_only": False,
             "signing_required": signed,
             "tests": results,
         }
