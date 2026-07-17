@@ -150,6 +150,16 @@ function(px4_add_common_flags)
 	foreach(flag ${c_flags})
 		add_compile_options($<$<COMPILE_LANGUAGE:C>:${flag}>)
 	endforeach()
+	if(CMAKE_C_COMPILER_ID MATCHES "Clang"
+	   AND CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 17)
+		# PX4 1.14 still contains K&R-style empty parameter lists. Clang 17
+		# diagnoses those as deprecated in C, and the global -Werror turns
+		# that compatibility warning into a build failure.
+		add_compile_options(
+			$<$<COMPILE_LANGUAGE:C>:-Wno-deprecated-non-prototype>
+			$<$<COMPILE_LANGUAGE:C>:-Wno-strict-prototypes>
+		)
+	endif()
 
 
 	# CXX only flags
@@ -160,6 +170,16 @@ function(px4_add_common_flags)
 		# disabled warnings
 		-Wno-overloaded-virtual # TODO: fix and remove
 	)
+	if(CMAKE_CXX_COMPILER_ID MATCHES "Clang"
+	   AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 17)
+		# PX4 1.14 predates Clang 17's deprecation diagnostics and its
+		# C++ VLA-extension warning. Keep this compatibility allowance
+		# host-only; the firmware compiler flags are unchanged.
+		list(APPEND cxx_flags
+			-Wno-deprecated-declarations
+			-Wno-vla-cxx-extension
+		)
+	endif()
 
 	if((NOT CMAKE_BUILD_TYPE STREQUAL FuzzTesting) AND (NOT PX4_CONFIG MATCHES "px4_sitl"))
 		list(APPEND cxx_flags

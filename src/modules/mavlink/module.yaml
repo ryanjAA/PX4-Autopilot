@@ -47,6 +47,68 @@ serial_config:
 parameters:
     - group: MAVLink
       definitions:
+        MVM_ENABLE:
+            description:
+                short: Enable private inert MAVLink-M cue endpoint
+                long: |
+                    Enables exact-profile capability advertisement, durable
+                    addressed cue receipt, and local pilot decisions. This
+                    endpoint never changes navigation, flight mode, arming, or
+                    payload state.
+            type: boolean
+            default: true
+
+        MVM_SIGN_REQ:
+            description:
+                short: Require MAVLink 2 signing for MAVLink-M
+                long: |
+                    PX4 1.14 does not provide key-backed MAVLink 2 signature
+                    validation in this integration. Setting this true therefore
+                    disables capability advertisement and cue receipt fail
+                    closed. Leave false only for private inert lab work.
+            type: boolean
+            default: false
+
+        MVM_RC_CH:
+            description:
+                short: RC channel for Reject/Center/Accept
+                long: |
+                    One-based raw RC channel used for local MAVLink-M cue
+                    decisions. Zero disables RC decisions. The switch must pass
+                    through the configured center band after boot and after
+                    every decision.
+            type: int32
+            min: 0
+            max: 18
+            default: 0
+
+        MVM_RC_REJ:
+            description:
+                short: Normalized RC reject threshold
+            type: float
+            min: -1.0
+            max: -0.3
+            decimal: 2
+            default: -0.65
+
+        MVM_RC_ACC:
+            description:
+                short: Normalized RC accept threshold
+            type: float
+            min: 0.3
+            max: 1.0
+            decimal: 2
+            default: 0.65
+
+        MVM_RC_CTR:
+            description:
+                short: Absolute normalized RC center band
+            type: float
+            min: 0.05
+            max: 0.29
+            decimal: 2
+            default: 0.25
+
         MAV_${i}_MODE:
             description:
                 short: MAVLink Mode for instance ${i}

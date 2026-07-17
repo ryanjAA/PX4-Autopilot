@@ -163,7 +163,8 @@ static const unsigned g_per_item_max_index[DM_KEY_NUM_KEYS] = {
 	DM_KEY_WAYPOINTS_OFFBOARD_0_MAX,
 	DM_KEY_WAYPOINTS_OFFBOARD_1_MAX,
 	DM_KEY_MISSION_STATE_MAX,
-	DM_KEY_COMPAT_MAX
+	DM_KEY_COMPAT_MAX,
+	DM_KEY_MAVLINK_M_INBOX_MAX
 };
 
 #define DM_SECTOR_HDR_SIZE 4	/* data manager per item header overhead */
@@ -175,7 +176,8 @@ static constexpr size_t g_per_item_size[DM_KEY_NUM_KEYS] = {
 	sizeof(struct mission_item_s) + DM_SECTOR_HDR_SIZE,
 	sizeof(struct mission_item_s) + DM_SECTOR_HDR_SIZE,
 	sizeof(struct mission_s) + DM_SECTOR_HDR_SIZE,
-	sizeof(struct dataman_compat_s) + DM_SECTOR_HDR_SIZE
+	sizeof(struct dataman_compat_s) + DM_SECTOR_HDR_SIZE,
+	DM_KEY_MAVLINK_M_INBOX_SIZE + DM_SECTOR_HDR_SIZE
 };
 
 /* Table of offset for index 0 of each item type */

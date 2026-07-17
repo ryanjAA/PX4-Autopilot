@@ -54,6 +54,7 @@ typedef enum {
 	DM_KEY_WAYPOINTS_OFFBOARD_1,	/* (alternate between 0 and 1) */
 	DM_KEY_MISSION_STATE,		/* Persistent mission state */
 	DM_KEY_COMPAT,
+	DM_KEY_MAVLINK_M_INBOX,		/* Private inert MAVLink-M records and frozen replies */
 	DM_KEY_NUM_KEYS			/* Total number of item types defined */
 } dm_item_t;
 
@@ -64,7 +65,8 @@ enum {
 	DM_KEY_WAYPOINTS_OFFBOARD_0_MAX = NUM_MISSIONS_SUPPORTED,
 	DM_KEY_WAYPOINTS_OFFBOARD_1_MAX = NUM_MISSIONS_SUPPORTED,
 	DM_KEY_MISSION_STATE_MAX = 1,
-	DM_KEY_COMPAT_MAX = 1
+	DM_KEY_COMPAT_MAX = 1,
+	DM_KEY_MAVLINK_M_INBOX_MAX = 16
 };
 #else
 /** The maximum number of instances for each item type */
@@ -74,9 +76,13 @@ enum {
 	DM_KEY_WAYPOINTS_OFFBOARD_0_MAX = NUM_MISSIONS_SUPPORTED,
 	DM_KEY_WAYPOINTS_OFFBOARD_1_MAX = NUM_MISSIONS_SUPPORTED,
 	DM_KEY_MISSION_STATE_MAX = 1,
-	DM_KEY_COMPAT_MAX = 1
+	DM_KEY_COMPAT_MAX = 1,
+	DM_KEY_MAVLINK_M_INBOX_MAX = 16
 };
 #endif
+
+// Dataman's on-disk item header stores the user length in one byte.
+static constexpr size_t DM_KEY_MAVLINK_M_INBOX_SIZE = 252;
 
 struct dataman_compat_s {
 	uint64_t key;

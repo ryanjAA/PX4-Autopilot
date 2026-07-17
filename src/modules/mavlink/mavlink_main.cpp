@@ -59,6 +59,7 @@
 #include <uORB/topics/event.h>
 #include "mavlink_receiver.h"
 #include "mavlink_main.h"
+#include "mavlink_m_endpoint.h"
 
 // Guard against MAVLink misconfiguration
 #ifndef MAVLINK_CRC_EXTRA
@@ -3257,6 +3258,9 @@ $ mavlink stream -u 14556 -s HIGHRES_IMU -r 50
 	PRINT_MODULE_USAGE_PARAM_STRING('s', nullptr, nullptr, "Mavlink stream to configure", false);
 	PRINT_MODULE_USAGE_PARAM_FLOAT('r', -1.0f, 0.0f, 2000.0f, "Rate in Hz (0 = turn off, -1 = set to default)", false);
 
+	PRINT_MODULE_USAGE_COMMAND_DESCR("mavlink_m",
+					 "Local inert cue decision/status: status|accept|reject|enroute|ready|complete|abort|fail");
+
 	PRINT_MODULE_USAGE_COMMAND_DESCR("boot_complete",
 					 "Enable sending of messages. (Must be) called as last step in startup script.");
 
@@ -3284,6 +3288,9 @@ extern "C" __EXPORT int mavlink_main(int argc, char *argv[])
 
 	} else if (!strcmp(argv[1], "stream")) {
 		return Mavlink::stream_command(argc, argv);
+
+	} else if (!strcmp(argv[1], "mavlink_m")) {
+		return MavlinkMEndpoint::command(argc - 2, argv + 2);
 
 	} else if (!strcmp(argv[1], "boot_complete")) {
 		Mavlink::set_boot_complete();

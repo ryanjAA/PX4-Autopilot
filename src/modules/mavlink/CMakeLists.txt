@@ -67,6 +67,19 @@ add_custom_target(mavlink_c_generate_uavionix DEPENDS ${MAVLINK_LIBRARY_DIR}/${M
 set_source_files_properties(${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/${MAVLINK_DIALECT_UAVIONIX}.h PROPERTIES GENERATED true)
 
 # generate the primary dialect
+if("${CONFIG_MAVLINK_DIALECT}" STREQUAL "mavlink_m")
+	file(SHA256
+		"${MAVLINK_GIT_DIR}/message_definitions/v1.0/mavlink_m.xml"
+		MAVLINK_M_DIALECT_SHA256
+	)
+	if(NOT MAVLINK_M_DIALECT_SHA256 STREQUAL "f8089061a6a216ef5f1bd4ba5b3242f38f3167b81050c9667121f31e46c36d8e")
+		message(FATAL_ERROR
+			"mavlink_m.xml does not match private profile private-inert-2026-07-17-v2: "
+			"${MAVLINK_M_DIALECT_SHA256}"
+		)
+	endif()
+endif()
+
 add_custom_command(
 	OUTPUT ${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}/${CONFIG_MAVLINK_DIALECT}.h
 	COMMAND
@@ -120,6 +133,7 @@ px4_add_module(
 		mavlink_events.cpp
 		mavlink_ftp.cpp
 		mavlink_log_handler.cpp
+		mavlink_m_endpoint.cpp
 		mavlink_main.cpp
 		mavlink_messages.cpp
 		mavlink_mission.cpp

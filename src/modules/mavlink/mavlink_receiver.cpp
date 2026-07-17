@@ -59,6 +59,7 @@
 
 #include "mavlink_command_sender.h"
 #include "mavlink_main.h"
+#include "mavlink_m_endpoint.h"
 #include "mavlink_receiver.h"
 
 #include <lib/drivers/device/Device.hpp> // For DeviceId union
@@ -125,6 +126,8 @@ MavlinkReceiver::acknowledge(uint8_t sysid, uint8_t compid, uint16_t command, ui
 void
 MavlinkReceiver::handle_message(mavlink_message_t *msg)
 {
+	MavlinkMEndpoint::handle_message(_mavlink, msg);
+
 	switch (msg->msgid) {
 	case MAVLINK_MSG_ID_COMMAND_LONG:
 		handle_message_command_long(msg);
@@ -3377,6 +3380,7 @@ MavlinkReceiver::run()
 		const hrt_abstime t = hrt_absolute_time();
 
 		CheckHeartbeats(t);
+		MavlinkMEndpoint::update(_mavlink);
 
 		if (t - last_send_update > timeout * 1000) {
 			_mission_manager.check_active_mission();
