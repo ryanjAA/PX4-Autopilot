@@ -21,6 +21,31 @@ task status, idempotent cancel/supersede controls, unique handover IDs, fresh
 exact-hash capability advertisements, durable application storage, and bounded
 retries.
 
+## Supported build targets
+
+The private endpoint is an explicit board opt-in. This branch pins the same
+`mavlink_m` dialect and endpoint implementation for both supported targets:
+
+```sh
+make px4_sitl_default
+make px4_sitl_test
+cmake --build build/px4_sitl_test --target mavlink_m_conformance_test
+ctest --test-dir build/px4_sitl_test -R '^mavlink_m_conformance$' --output-on-failure
+make ark_fmu-v6x_default
+```
+
+The focused test commands use the `px4_sitl_test` configuration and run the
+profile conformance case through CTest.
+
+The ARK v6X flashable artifact is
+`build/ark_fmu-v6x_default/ark_fmu-v6x_default.px4`. Other boards retain the
+ordinary `common` dialect unless their defconfig explicitly selects both
+`CONFIG_MAVLINK_DIALECT="mavlink_m"` and
+`CONFIG_MAVLINK_M_PRIVATE_PROFILE=y`.
+
+Selecting the endpoint at build time does not enable it at runtime:
+`MAV_M_MODE=0` remains the fail-closed default on SITL and ARK v6X.
+
 ## PX4 configuration
 
 `MAV_M_MODE=0` is the default and ignores all private task traffic.

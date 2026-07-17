@@ -103,10 +103,14 @@ MavlinkReceiver::MavlinkReceiver(Mavlink *parent) :
 	_mavlink_log_handler(parent),
 	_mission_manager(parent),
 	_parameters_manager(parent),
-	_mavlink_timesync(parent),
-	_mavlink_m_handler(parent)
+	_mavlink_timesync(parent)
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	, _mavlink_m_handler(parent)
+#endif
 {
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 	_mavlink_m_handler.configure_receiver_status(&_status);
+#endif
 }
 
 void
@@ -127,7 +131,9 @@ MavlinkReceiver::acknowledge(uint8_t sysid, uint8_t compid, uint16_t command, ui
 void
 MavlinkReceiver::handle_message(mavlink_message_t *msg)
 {
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 	_mavlink_m_handler.handle_message(*msg);
+#endif
 
 	switch (msg->msgid) {
 	case MAVLINK_MSG_ID_COMMAND_LONG:
@@ -3381,7 +3387,9 @@ MavlinkReceiver::run()
 		const hrt_abstime t = hrt_absolute_time();
 
 		CheckHeartbeats(t);
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 		_mavlink_m_handler.update();
+#endif
 
 		if (t - last_send_update > timeout * 1000) {
 			_mission_manager.check_active_mission();
@@ -3607,7 +3615,9 @@ MavlinkReceiver::updateParams()
 {
 	// update parameters from storage
 	ModuleParams::updateParams();
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 	_mavlink_m_handler.update_parameters();
+#endif
 }
 
 void *MavlinkReceiver::start_trampoline(void *context)

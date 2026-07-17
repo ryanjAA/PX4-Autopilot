@@ -57,7 +57,9 @@
 #include <px4_platform_common/events.h>
 
 #include <uORB/topics/event.h>
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 #include <uORB/topics/mavlink_m_task_decision.h>
+#endif
 #include "mavlink_receiver.h"
 #include "mavlink_main.h"
 
@@ -94,6 +96,7 @@ mavlink_message_t *mavlink_get_channel_buffer(uint8_t channel) { return mavlink_
 
 static void usage();
 
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 static int task_decision_command(int argc, char *argv[])
 {
 	if (argc < 3 || (strcmp(argv[2], "accept") != 0 && strcmp(argv[2], "reject") != 0)) {
@@ -145,6 +148,7 @@ static int task_decision_command(int argc, char *argv[])
 		 argv[2], static_cast<long>(system_id), instance, msgid);
 	return 0;
 }
+#endif
 
 hrt_abstime Mavlink::_first_start_time = {0};
 
@@ -3312,8 +3316,10 @@ $ mavlink stream -u 14556 -s HIGHRES_IMU -r 50
 
 	PRINT_MODULE_USAGE_COMMAND_DESCR("boot_complete",
 					 "Enable sending of messages. (Must be) called as last step in startup script.");
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 	PRINT_MODULE_USAGE_COMMAND_DESCR("task",
 					 "Local private-inert task decision: task {accept|reject} [task_instance] [task_msgid]");
+#endif
 
 }
 
@@ -3340,8 +3346,10 @@ extern "C" __EXPORT int mavlink_main(int argc, char *argv[])
 	} else if (!strcmp(argv[1], "stream")) {
 		return Mavlink::stream_command(argc, argv);
 
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 	} else if (!strcmp(argv[1], "task")) {
 		return task_decision_command(argc, argv);
+#endif
 
 	} else if (!strcmp(argv[1], "boot_complete")) {
 		Mavlink::set_boot_complete();

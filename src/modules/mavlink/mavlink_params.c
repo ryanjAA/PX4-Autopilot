@@ -253,12 +253,13 @@ PARAM_DEFINE_INT32(MAV_M_RC_REJ, 1300);
 PARAM_DEFINE_INT32(MAV_M_RC_ACC, 1700);
 
 /**
- * Maximum age and local lifetime of a cue
+ * Maximum accepted age of a cue
  *
- * TARGET_CUE has no wire expiry in the supplied profile. This parameter is
- * therefore both the maximum accepted age and the fail-closed local lifetime
- * measured from its UTC timestamp. Zero disables both checks and is not
- * recommended. A valid UTC clock is required when this is nonzero.
+ * TARGET_CUE carries an explicit valid_until_usec deadline. This independent
+ * bound rejects cues whose creation timestamp is older than the configured
+ * replay window even when their advertised deadline has not passed. Zero
+ * disables only this age check. A valid UTC clock is always required for the
+ * wire deadline.
  *
  * @group MAVLink-M
  * @unit s

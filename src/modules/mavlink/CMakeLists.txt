@@ -49,6 +49,10 @@ if(NOT MAVLINK_GENERATOR_VERSION_LINE)
 	message(FATAL_ERROR "AAGS profile requires vendored pymavlink 2.4.49")
 endif()
 
+if(CONFIG_MAVLINK_M_PRIVATE_PROFILE AND NOT "${CONFIG_MAVLINK_DIALECT}" STREQUAL "mavlink_m")
+	message(FATAL_ERROR "CONFIG_MAVLINK_M_PRIVATE_PROFILE requires CONFIG_MAVLINK_DIALECT=mavlink_m")
+endif()
+
 if("${CONFIG_MAVLINK_DIALECT}" STREQUAL "mavlink_m")
 	file(SHA256 "${MAVLINK_GIT_DIR}/message_definitions/v1.0/mavlink_m.xml" MAVLINK_M_CORE_SHA256)
 
@@ -133,6 +137,12 @@ target_include_directories(mavlink_c
 		${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}
 )
 
+set(MAVLINK_M_PRIVATE_SOURCES)
+
+if(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	list(APPEND MAVLINK_M_PRIVATE_SOURCES MavlinkMHandler.cpp)
+endif()
+
 px4_add_module(
 	MODULE modules__mavlink
 	MAIN mavlink
@@ -151,7 +161,7 @@ px4_add_module(
 		mavlink_parameters.cpp
 		mavlink_rate_limiter.cpp
 		mavlink_receiver.cpp
-		MavlinkMHandler.cpp
+		${MAVLINK_M_PRIVATE_SOURCES}
 		mavlink_shell.cpp
 		mavlink_simple_analyzer.cpp
 		mavlink_stream.cpp
@@ -183,7 +193,7 @@ px4_add_module(
 if(PX4_TESTING)
 	add_subdirectory(mavlink_tests)
 
-	if("${PX4_PLATFORM}" MATCHES "posix")
+	if(CONFIG_MAVLINK_M_PRIVATE_PROFILE AND "${PX4_PLATFORM}" MATCHES "posix")
 		add_executable(mavlink_m_conformance_test
 			mavlink_tests/MavlinkMConformanceTest.c
 		)
