@@ -6,12 +6,14 @@ dialect used by AAGS.
 
 Branch scope:
 
-- `v1.14-CAM-MAV-M` contains the production-oriented receiver, authority
-  state machine, owner decisions, ACK behavior, action policy, safety gates,
-  conformance sources, endpoint tool, and ARK v6X board enablement.
-- `v1.14-CAM-MAV-M-SITL` is based on this branch and adds the workstation
-  macOS, current-Clang, Gazebo Classic, dual-runner, and SITL board support.
-- Production hardware does not require the workstation compatibility changes.
+- `v1.14-CAM-MAV-M-SITL` is based on `v1.14-CAM-MAV-M`.
+- It retains the production receiver, authority, decision, ACK, safety, and
+  action behavior from the core branch.
+- It additionally includes the workstation-specific macOS and current-Clang
+  compatibility changes, Gazebo Classic support, SITL board enablement, and
+  the dual-instance validation runner.
+- Production hardware should use `v1.14-CAM-MAV-M` unless these SITL and host
+  compatibility changes are specifically needed.
 
 Profile identity:
 
@@ -33,15 +35,13 @@ task-status messages are not part of this endpoint.
 
 ## Build
 
-The ARK v6X board configuration in this core branch opts into the `mavlink_m`
-dialect and receiver:
+The SITL and ARK v6X board configurations in this branch opt into the
+`mavlink_m` dialect and receiver:
 
 ```sh
+PATH=/tmp/px4-aags-venv/bin:$PATH make px4_sitl_default
 PATH=/tmp/px4-aags-venv/bin:$PATH make ark_fmu-v6x_default
 ```
-
-Enable the same Kconfig option and dialect on each production board that needs
-direct AAGS vehicle cue support.
 
 The endpoint is still disabled at runtime by default.
 
@@ -53,13 +53,12 @@ First identify the zero-based instance carrying the AAGS connection:
 mavlink status
 ```
 
-The optional `v1.14-CAM-MAV-M-SITL` branch supplies a dual-Gazebo runner. It
-uses each vehicle's stock instance `0` link for local AAGS cue and
-owner-control traffic (`MAV_M_SAME_EP=1`). It creates instance `4` later as
-telemetry-only visibility for the other AAGS; that observer route is
-intentionally not a cue endpoint. On any vehicle or launch topology, use the
-instance reported by `mavlink status`; do not infer `MAV_M_INST` from a UDP
-port or MAVLink channel number.
+The supplied dual-Gazebo runner uses each vehicle's stock instance `0` link
+for its local AAGS cue and owner-control traffic (`MAV_M_SAME_EP=1`). It
+creates instance `4` later as telemetry-only visibility for the other AAGS;
+that observer route is intentionally not a cue endpoint. On any other vehicle
+or launch topology, use the instance reported by `mavlink status`; do not
+infer `MAV_M_INST` from a UDP port or MAVLink channel number.
 
 Then choose one of two exact endpoint layouts:
 
@@ -279,12 +278,11 @@ payload authority.
 
 ## One-computer two-AAGS SITL test
 
-This procedure requires `v1.14-CAM-MAV-M-SITL`. Two computers are not
-required. Run two AAGS processes with different MAVLink system IDs. The
-runner assigns AAGS `254/190` as the local owner of SYS44 and AAGS `253/190`
-as the local owner of SYS45. Both stations can display both vehicles, but
-instance `4` on each PX4 is telemetry-only; cueing the other station's vehicle
-directly over that observer route is deliberately rejected.
+Two computers are not required. Run two AAGS processes with different MAVLink
+system IDs. The supplied runner assigns AAGS `254/190` as the local owner of
+SYS44 and AAGS `253/190` as the local owner of SYS45. Both stations can display
+both vehicles, but instance `4` on each PX4 is telemetry-only; cueing the other
+station's vehicle directly over that observer route is deliberately rejected.
 
 1. In AAGS 254, tag/select a contact and send an AAGS **Handover** to AAGS
    253.
@@ -367,9 +365,6 @@ reboot
 ```
 
 ## Verification
-
-The conformance source is portable. The command below uses the optional SITL
-branch or another configured host test build:
 
 ```sh
 PATH=/tmp/px4-aags-venv/bin:$PATH \

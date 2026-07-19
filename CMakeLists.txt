@@ -161,6 +161,13 @@ include(px4_add_module)
 set(config_module_list)
 set(config_kernel_list)
 
+# Prefer the project-local environment created by Tools/setup/macos.sh.
+# Homebrew may install a newer framework Python that does not contain PX4's
+# build dependencies even when the local environment is already configured.
+if(NOT DEFINED PYTHON_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/.venv/bin/python")
+	set(PYTHON_EXECUTABLE "${CMAKE_CURRENT_LIST_DIR}/.venv/bin/python")
+endif()
+
 # Find Python
 find_package(PythonInterp 3)
 # We have a custom error message to tell users how to install python3.

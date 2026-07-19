@@ -1,4 +1,54 @@
 
+set(gazebo_classic_external_cmake_args)
+
+if(APPLE)
+	# The current OpenCV formula links against a newer Protobuf than Gazebo
+	# Classic. Drop unused dylibs so non-camera models do not load both ABIs.
+	list(APPEND gazebo_classic_external_cmake_args
+		"-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-dead_strip_dylibs")
+endif()
+
+if(APPLE AND EXISTS "/usr/local/opt/boost@1.85.0")
+	# Gazebo Classic's Intel Homebrew formula uses a keg-only Boost version,
+	# which is not discoverable from the default CMake search paths.
+	list(PREPEND CMAKE_PREFIX_PATH "/usr/local/opt/boost@1.85.0")
+	list(APPEND gazebo_classic_external_cmake_args
+		"-DCMAKE_PREFIX_PATH=/usr/local/opt/boost@1.85.0")
+endif()
+
+if(APPLE AND EXISTS "/usr/local/opt/ogre1.9-with-boost1.85")
+	set(ogre_prefix "/usr/local/opt/ogre1.9-with-boost1.85")
+	list(PREPEND CMAKE_MODULE_PATH "${ogre_prefix}/share/OGRE/cmake/modules")
+	set(ENV{PKG_CONFIG_PATH} "${ogre_prefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+	list(APPEND gazebo_classic_external_cmake_args
+		"-DCMAKE_MODULE_PATH=${ogre_prefix}/share/OGRE/cmake/modules"
+		"-DOGRE_HOME=${ogre_prefix}")
+endif()
+
+if(APPLE AND EXISTS "/usr/local/opt/protobuf@29")
+	set(protobuf_prefix "/usr/local/opt/protobuf@29")
+	set(Protobuf_DIR "${protobuf_prefix}/lib/cmake/protobuf")
+	list(PREPEND CMAKE_PREFIX_PATH "${protobuf_prefix}")
+	list(APPEND gazebo_classic_external_cmake_args
+		"-DProtobuf_DIR=${Protobuf_DIR}"
+		"-DProtobuf_PROTOC_EXECUTABLE=${protobuf_prefix}/bin/protoc"
+		"-DProtobuf_INCLUDE_DIR=${protobuf_prefix}/include"
+		"-DProtobuf_LIBRARY=${protobuf_prefix}/lib/libprotobuf.dylib"
+		"-DCMAKE_CXX_FLAGS=-DTIXML_USE_STL -iquote${protobuf_prefix}/include")
+endif()
+
+if(APPLE AND EXISTS "/usr/local/opt/opencv@4")
+	list(APPEND gazebo_classic_external_cmake_args
+		"-DOpenCV_DIR=/usr/local/opt/opencv@4/lib/cmake/opencv4")
+endif()
+
+if(APPLE AND EXISTS "/usr/local/opt/tinyxml1")
+	list(APPEND gazebo_classic_external_cmake_args
+		"-DTinyXML_ROOT_DIR=/usr/local/opt/tinyxml1"
+		"-DTinyXML_INCLUDE_DIR=/usr/local/opt/tinyxml1/include"
+		"-DTinyXML_LIBRARY=/usr/local/opt/tinyxml1/lib/libtinyxml.dylib")
+endif()
+
 find_package(gazebo
 	QUIET
 )
@@ -48,8 +98,11 @@ if(gazebo_FOUND)
 		SOURCE_DIR ${PX4_SOURCE_DIR}/Tools/simulation/gazebo-classic/sitl_gazebo-classic
 		CMAKE_ARGS
 			-DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
+			-DCMAKE_POLICY_VERSION_MINIMUM=3.5
+			-DPYTHON_EXECUTABLE=${PYTHON_EXECUTABLE}
 			-DSEND_ODOMETRY_DATA=ON
 			-DGENERATE_ROS_MODELS=ON
+			${gazebo_classic_external_cmake_args}
 		BINARY_DIR ${PX4_BINARY_DIR}/build_gazebo-classic
 		INSTALL_COMMAND ""
 		DEPENDS git_sitl_gazebo-classic

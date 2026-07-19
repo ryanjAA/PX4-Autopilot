@@ -1,0 +1,969 @@
+diff --git a/.gitignore b/.gitignore
+index 165a8e361c..da6ce74be5 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -63,6 +63,7 @@ posix-configs/SITL/init/test/*_generated
+ *.gcov
+ .coverage
+ .coverage.*
++.venv/
+
+ # KDevelop ignores
+ .kdev4/*
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 741e8e574a..6a62e8603c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -161,6 +161,13 @@ include(px4_add_module)
+ set(config_module_list)
+ set(config_kernel_list)
+
++# Prefer the project-local environment created by Tools/setup/macos.sh.
++# Homebrew may install a newer framework Python that does not contain PX4's
++# build dependencies even when the local environment is already configured.
++if(NOT DEFINED PYTHON_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/.venv/bin/python")
++	set(PYTHON_EXECUTABLE "${CMAKE_CURRENT_LIST_DIR}/.venv/bin/python")
++endif()
++
+ # Find Python
+ find_package(PythonInterp 3)
+ # We have a custom error message to tell users how to install python3.
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/1031_gazebo-classic_plane_cam b/ROMFS/px4fmu_common/init.d-posix/airframes/1031_gazebo-classic_plane_cam
+index 743698450c..0b452e2ca4 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/1031_gazebo-classic_plane_cam
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/1031_gazebo-classic_plane_cam
+@@ -39,7 +39,6 @@ param set-default FW_T_SINK_MIN 2.2
+
+ param set-default FW_W_EN 1
+
+-param set-default MIS_LTRMIN_ALT 30
+ param set-default MIS_TAKEOFF_ALT 30
+
+ param set-default NAV_ACC_RAD 15
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/1032_gazebo-classic_plane_catapult b/ROMFS/px4fmu_common/init.d-posix/airframes/1032_gazebo-classic_plane_catapult
+index 9ce6cb61dd..fc5790ef43 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/1032_gazebo-classic_plane_catapult
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/1032_gazebo-classic_plane_catapult
+@@ -41,7 +41,6 @@ param set-default FW_T_SINK_MIN 2.2
+
+ param set-default FW_W_EN 1
+
+-param set-default MIS_LTRMIN_ALT 30
+ param set-default MIS_TAKEOFF_ALT 30
+
+ param set-default NAV_ACC_RAD 15
+@@ -71,4 +70,3 @@ param set-default PWM_MAIN_FUNC7 202
+ param set-default PWM_MAIN_FUNC8 203
+ param set-default PWM_MAIN_FUNC9 206
+ param set-default PWM_MAIN_REV 256
+-
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/1038_gazebo-classic_glider b/ROMFS/px4fmu_common/init.d-posix/airframes/1038_gazebo-classic_glider
+index 294c07b3ef..b37e5d1eee 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/1038_gazebo-classic_glider
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/1038_gazebo-classic_glider
+@@ -39,7 +39,6 @@ param set-default FW_T_SINK_MIN 2.2
+
+ param set-default FW_W_EN 1
+
+-param set-default MIS_LTRMIN_ALT 30
+ param set-default MIS_TAKEOFF_ALT 30
+
+ param set-default NAV_ACC_RAD 15
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/1039_flightgear_rascal b/ROMFS/px4fmu_common/init.d-posix/airframes/1039_flightgear_rascal
+index 490d15b9c7..1c59078c53 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/1039_flightgear_rascal
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/1039_flightgear_rascal
+@@ -23,7 +23,6 @@ param set-default FW_RR_P 0.085
+
+ param set-default FW_W_EN 1
+
+-param set-default MIS_LTRMIN_ALT 30
+ param set-default MIS_TAKEOFF_ALT 20
+ param set-default MIS_DIST_1WP 2500
+
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/1044_gazebo-classic_plane_lidar b/ROMFS/px4fmu_common/init.d-posix/airframes/1044_gazebo-classic_plane_lidar
+index a92e0cf2c8..a33656abf3 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/1044_gazebo-classic_plane_lidar
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/1044_gazebo-classic_plane_lidar
+@@ -39,7 +39,6 @@ param set-default FW_T_SINK_MIN 2.2
+
+ param set-default FW_W_EN 1
+
+-param set-default MIS_LTRMIN_ALT 30
+ param set-default MIS_TAKEOFF_ALT 30
+
+ param set-default NAV_ACC_RAD 15
+diff --git a/ROMFS/px4fmu_common/init.d-posix/px4-rc.simulator b/ROMFS/px4fmu_common/init.d-posix/px4-rc.simulator
+index 1f4693d4c1..61066df08c 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/px4-rc.simulator
++++ b/ROMFS/px4fmu_common/init.d-posix/px4-rc.simulator
+@@ -36,7 +36,7 @@ if [ "$PX4_SIMULATOR" = "sihsim" ] || [ "$(param show -q SYS_AUTOSTART)" -eq "0"
+ 		exit 1
+ 	fi
+
+-elif [ "$PX4_SIMULATOR" = "gz" ] || [ "$(param show -q SIM_GZ_EN)" -eq "1" ]; then
++elif [ "$PX4_SIMULATOR" = "gz" ] || [ "$(param show -q SIM_GZ_EN)" = "1" ]; then
+
+ 	# source generated gz_env.sh for GZ_SIM_RESOURCE_PATH
+ 	if [ -f ./gz_env.sh ]; then
+diff --git a/Tools/setup/macos.sh b/Tools/setup/macos.sh
+index f2c64483be..75524dff63 100755
+--- a/Tools/setup/macos.sh
++++ b/Tools/setup/macos.sh
+@@ -47,9 +47,17 @@ fi
+
+ # Python dependencies
+ echo "Installing PX4 Python3 dependencies"
++ROOT_DIR="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null || echo "$DIR")"
++VENV_DIR="$ROOT_DIR/.venv"
++
++if [[ ! -d "$VENV_DIR" ]]; then
++	echo "Creating Python virtual environment at $VENV_DIR"
++	python3 -m venv "$VENV_DIR"
++fi
++
+ # We need to have future to install pymavlink later.
+-python3 -m pip install future
+-python3 -m pip install --user -r ${DIR}/requirements.txt
++"$VENV_DIR/bin/python" -m pip install future
++"$VENV_DIR/bin/python" -m pip install -r "${DIR}/requirements.txt"
+
+ # Optional, but recommended additional simulation tools:
+ if [[ $INSTALL_SIM == "--sim-tools" ]]; then
+diff --git a/Tools/setup/requirements.txt b/Tools/setup/requirements.txt
+index 2db827d34e..89ed7f28f3 100644
+--- a/Tools/setup/requirements.txt
++++ b/Tools/setup/requirements.txt
+@@ -8,7 +8,7 @@ jinja2>=2.8
+ jsonschema
+ kconfiglib
+ lxml
+-matplotlib>=3.0.*
++matplotlib>=3.0
+ numpy>=1.13
+ nunavut>=1.1.0
+ packaging
+diff --git a/boards/beaglebone/blue/adc/adc.cpp b/boards/beaglebone/blue/adc/adc.cpp
+index 7d9aec5c5e..6b9dbf1864 100644
+--- a/boards/beaglebone/blue/adc/adc.cpp
++++ b/boards/beaglebone/blue/adc/adc.cpp
+@@ -74,7 +74,7 @@ uint32_t px4_arch_adc_sample(uint32_t base_address, unsigned channel)
+ 		// ADC_SYSFS_PATH
+ 		char channel_path[strlen(ADC_SYSFS_PATH) + 20] {};
+
+-		if (sprintf(channel_path, "%s/in_voltage%d_raw", ADC_SYSFS_PATH, channel) == -1) {
++		if (snprintf(channel_path, sizeof(channel_path), "%s/in_voltage%d_raw", ADC_SYSFS_PATH, channel) == -1) {
+ 			PX4_ERR("adc channel: %d\n", channel);
+ 			return UINT32_MAX; // error
+ 		}
+diff --git a/boards/emlid/navio2/adc/adc.cpp b/boards/emlid/navio2/adc/adc.cpp
+index 017c600876..d804fbe74e 100644
+--- a/boards/emlid/navio2/adc/adc.cpp
++++ b/boards/emlid/navio2/adc/adc.cpp
+@@ -74,7 +74,7 @@ uint32_t px4_arch_adc_sample(uint32_t base_address, unsigned channel)
+ 		// ADC_SYSFS_PATH
+ 		char channel_path[strlen(ADC_SYSFS_PATH) + 5] {};
+
+-		if (sprintf(channel_path, "%s/ch%d", ADC_SYSFS_PATH, channel) == -1) {
++		if (snprintf(channel_path, sizeof(channel_path), "%s/ch%d", ADC_SYSFS_PATH, channel) == -1) {
+ 			PX4_ERR("adc channel: %d\n", channel);
+ 			return UINT32_MAX; // error
+ 		}
+diff --git a/boards/px4/sitl/src/sitl_led.c b/boards/px4/sitl/src/sitl_led.c
+index c9d3f4d053..f86e877764 100644
+--- a/boards/px4/sitl/src/sitl_led.c
++++ b/boards/px4/sitl/src/sitl_led.c
+@@ -50,7 +50,7 @@ __END_DECLS
+
+ static bool _led_state[2] = { false, false };
+
+-__EXPORT void led_init()
++__EXPORT void led_init(void)
+ {
+ 	PX4_DEBUG("LED_INIT");
+ }
+diff --git a/cmake/px4_add_common_flags.cmake b/cmake/px4_add_common_flags.cmake
+index 3daedfa044..ff3842053b 100644
+--- a/cmake/px4_add_common_flags.cmake
++++ b/cmake/px4_add_common_flags.cmake
+@@ -105,6 +105,7 @@ function(px4_add_common_flags)
+ 			-Wno-unknown-warning-option
+ 			-Wno-unused-const-variable
+ 			-Wno-varargs
++			-Wno-vla-cxx-extension # FIXME: do not use variable length arrays
+ 		)
+
+ 	elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+diff --git a/platforms/common/px4_log.cpp b/platforms/common/px4_log.cpp
+index 8e733b5ee4..6a7c7490d7 100644
+--- a/platforms/common/px4_log.cpp
++++ b/platforms/common/px4_log.cpp
+@@ -103,7 +103,7 @@ __EXPORT void px4_log_modulename(int level, const char *module_name, const char
+ #if defined(PX4_LOG_COLORIZED_OUTPUT)
+
+ 		if (use_color) {
+-			pos += sprintf(buf + pos, "%s", __px4_log_level_color[level]);
++			pos += snprintf(buf + pos, math::max(max_length - pos, (ssize_t)0), "%s", __px4_log_level_color[level]);
+ 		}
+
+ #endif // PX4_LOG_COLORIZED_OUTPUT
+@@ -138,12 +138,12 @@ __EXPORT void px4_log_modulename(int level, const char *module_name, const char
+ 		if (use_color) {
+ 			// alway reset color
+ 			const ssize_t sz = math::min(pos, max_length - (ssize_t)strlen(PX4_ANSI_COLOR_RESET) - (ssize_t)1);
+-			pos += sprintf(buf + sz, "%s\n", PX4_ANSI_COLOR_RESET);
++			pos += snprintf(buf + sz, math::max(max_length - sz, (ssize_t)0), "%s\n", PX4_ANSI_COLOR_RESET);
+
+ 		} else
+ #endif // PX4_LOG_COLORIZED_OUTPUT
+ 		{
+-			pos += sprintf(buf + math::min(pos, max_length - (ssize_t)1), "\n");
++			pos += snprintf(buf + math::min(pos, max_length - (ssize_t)1), 2, "\n");
+ 		}
+
+ 		// ensure NULL termination (buffer is max_length + 1)
+@@ -162,7 +162,7 @@ __EXPORT void px4_log_modulename(int level, const char *module_name, const char
+ 			va_start(argptr, fmt);
+ 			pos += vsnprintf(buf + pos, math::max(max_length - pos, (ssize_t)0), fmt, argptr);
+ 			va_end(argptr);
+-			pos += sprintf(buf + math::min(pos, max_length - (ssize_t)1), "\n");
++				pos += snprintf(buf + math::min(pos, max_length - (ssize_t)1), 2, "\n");
+ 			buf[max_length] = 0; // ensure NULL termination
+ 		}
+
+@@ -220,7 +220,7 @@ __EXPORT void px4_log_raw(int level, const char *fmt, ...)
+ #if defined(PX4_LOG_COLORIZED_OUTPUT)
+
+ 		if (use_color) {
+-			pos += sprintf(buf + pos, "%s", __px4_log_level_color[level]);
++			pos += snprintf(buf + pos, math::max(max_length - pos, (ssize_t)0), "%s", __px4_log_level_color[level]);
+ 		}
+
+ #endif // PX4_LOG_COLORIZED_OUTPUT
+@@ -235,7 +235,7 @@ __EXPORT void px4_log_raw(int level, const char *fmt, ...)
+ 		if (use_color) {
+ 			// alway reset color
+ 			const ssize_t sz = math::min(pos, max_length - (ssize_t)strlen(PX4_ANSI_COLOR_RESET));
+-			pos += sprintf(buf + sz, "%s", PX4_ANSI_COLOR_RESET);
++			pos += snprintf(buf + sz, math::max(max_length - sz, (ssize_t)0), "%s", PX4_ANSI_COLOR_RESET);
+ 		}
+
+ #endif // PX4_LOG_COLORIZED_OUTPUT
+diff --git a/platforms/common/px4_work_queue/WorkQueueManager.cpp b/platforms/common/px4_work_queue/WorkQueueManager.cpp
+index 8d961c14b3..d5bf28bcf8 100644
+--- a/platforms/common/px4_work_queue/WorkQueueManager.cpp
++++ b/platforms/common/px4_work_queue/WorkQueueManager.cpp
+@@ -340,7 +340,7 @@ WorkQueueManagerRun(int, char **)
+
+ 			// pack wq struct pointer into string, this is compatible with px4_task_spawn_cmd
+ 			char arg1[sizeof(void *) * 3];
+-			sprintf(arg1, "%lx", (long unsigned)wq);
++			snprintf(arg1, sizeof(arg1), "%lx", (long unsigned)wq);
+ 			const char *arg[2] = {arg1, nullptr};
+
+ 			int pid = px4_task_spawn_cmd(wq->name,
+diff --git a/platforms/common/uORB/uORB_tests/uORBTest_UnitTest.cpp b/platforms/common/uORB/uORB_tests/uORBTest_UnitTest.cpp
+index bc7cda5132..f8631fa04d 100644
+--- a/platforms/common/uORB/uORB_tests/uORBTest_UnitTest.cpp
++++ b/platforms/common/uORB/uORB_tests/uORBTest_UnitTest.cpp
+@@ -111,7 +111,7 @@ int uORBTest::UnitTest::pubsublatency_main()
+
+ 	if (pubsubtest_print && timings) {
+ 		char fname[32] {};
+-		sprintf(fname, PX4_STORAGEDIR"/uorb_timings%u.txt", timingsgroup);
++		snprintf(fname, sizeof(fname), PX4_STORAGEDIR"/uorb_timings%u.txt", timingsgroup);
+ 		FILE *f = fopen(fname, "w");
+
+ 		if (f == nullptr) {
+diff --git a/platforms/common/work_queue/hrt_thread.c b/platforms/common/work_queue/hrt_thread.c
+index 8438b0ae2c..8da8b415d1 100644
+--- a/platforms/common/work_queue/hrt_thread.c
++++ b/platforms/common/work_queue/hrt_thread.c
+@@ -113,7 +113,7 @@ static void _sighandler(int sig_num)
+  *
+  ****************************************************************************/
+
+-static void hrt_work_process()
++static void hrt_work_process(void)
+ {
+ 	struct wqueue_s *wqueue = &g_hrt_work;
+ 	volatile struct work_s *work;
+diff --git a/platforms/common/work_queue/work_thread.c b/platforms/common/work_queue/work_thread.c
+index b1e0e72355..5109b6ad8a 100644
+--- a/platforms/common/work_queue/work_thread.c
++++ b/platforms/common/work_queue/work_thread.c
+@@ -338,7 +338,7 @@ int work_usrthread(int argc, char *argv[])
+
+ #endif /* CONFIG_SCHED_USRWORK */
+
+-uint32_t clock_systimer()
++uint32_t clock_systimer(void)
+ {
+ 	//printf("clock_systimer: %0lx\n", hrt_absolute_time());
+ 	return (0x00000000ffffffff & hrt_absolute_time());
+diff --git a/platforms/posix/include/hrt_work.h b/platforms/posix/include/hrt_work.h
+index 6dd2ab5a09..317387ed31 100644
+--- a/platforms/posix/include/hrt_work.h
++++ b/platforms/posix/include/hrt_work.h
+@@ -48,16 +48,15 @@ int hrt_work_queue(struct work_s *work, worker_t worker, void *arg, uint32_t usd
+ void hrt_work_cancel(struct work_s *work);
+
+ static inline void hrt_work_lock(void);
+-static inline void hrt_work_lock()
++static inline void hrt_work_lock(void)
+ {
+ 	px4_sem_wait(&_hrt_work_lock);
+ }
+
+ static inline void hrt_work_unlock(void);
+-static inline void hrt_work_unlock()
++static inline void hrt_work_unlock(void)
+ {
+ 	px4_sem_post(&_hrt_work_lock);
+ }
+
+ __END_DECLS
+-
+diff --git a/platforms/posix/src/px4/common/px4_daemon/pxh.cpp b/platforms/posix/src/px4/common/px4_daemon/pxh.cpp
+index c17bbda267..349010aff8 100644
+--- a/platforms/posix/src/px4/common/px4_daemon/pxh.cpp
++++ b/platforms/posix/src/px4/common/px4_daemon/pxh.cpp
+@@ -100,7 +100,7 @@ int Pxh::process_line(const std::string &line, bool silently_fail)
+
+ 		// Note that argv[argc] always needs to be a nullptr.
+ 		// Therefore add one more entry.
+-		const char *arg[words.size() + 1];
++		char **arg = new char *[words.size() + 1];
+
+ 		for (unsigned i = 0; i < words.size(); ++i) {
+ 			arg[i] = (char *)words[i].c_str();
+@@ -109,7 +109,7 @@ int Pxh::process_line(const std::string &line, bool silently_fail)
+ 		// Explicitly set this nullptr.
+ 		arg[words.size()] = nullptr;
+
+-		int retval = _apps[command](words.size(), (char **)arg);
++		int retval = _apps[command](words.size(), arg);
+
+ 		if (retval) {
+ 			if (!silently_fail) {
+@@ -117,6 +117,8 @@ int Pxh::process_line(const std::string &line, bool silently_fail)
+ 			}
+ 		}
+
++		delete[] arg;
++
+ 		return retval;
+
+ 	} else if (command == "help") {
+diff --git a/src/drivers/telemetry/iridiumsbd/IridiumSBD.cpp b/src/drivers/telemetry/iridiumsbd/IridiumSBD.cpp
+index 5fddd4ac46..c054563175 100644
+--- a/src/drivers/telemetry/iridiumsbd/IridiumSBD.cpp
++++ b/src/drivers/telemetry/iridiumsbd/IridiumSBD.cpp
+@@ -726,7 +726,7 @@ void IridiumSBD::write_tx_buf()
+ 	pthread_mutex_lock(&_tx_buf_mutex);
+
+ 	char command[13];
+-	sprintf(command, "AT+SBDWB=%d", _tx_buf_write_idx);
++	snprintf(command, sizeof(command), "AT+SBDWB=%d", _tx_buf_write_idx);
+ 	write_at(command);
+
+ 	if (read_at_command() != SATCOM_RESULT_READY) {
+diff --git a/src/lib/rc/rc_tests/RCTest.cpp b/src/lib/rc/rc_tests/RCTest.cpp
+index 07c45d33c0..c79e0b1773 100644
+--- a/src/lib/rc/rc_tests/RCTest.cpp
++++ b/src/lib/rc/rc_tests/RCTest.cpp
+@@ -359,7 +359,6 @@ bool RCTest::sbus2Test()
+ 	bool sbus_frame_drop;
+ 	uint16_t max_channels = sizeof(rc_values) / sizeof(rc_values[0]);
+
+-	int rate_limiter = 0;
+ 	unsigned last_drop = 0;
+
+ 	while (EOF != (ret = fscanf(fp, "%f,%x,,", &f, &x))) {
+@@ -390,7 +389,6 @@ bool RCTest::sbus2Test()
+ 			last_drop = sbus_frame_drops + sbus_frame_resets;
+ 		}
+
+-		rate_limiter++;
+ 	}
+
+ 	ut_test(ret == EOF);
+@@ -525,4 +523,3 @@ bool RCTest::sumdTest()
+
+
+ ut_declare_test_c(rc_tests_main, RCTest)
+-
+diff --git a/src/lib/sensor_calibration/Utilities.cpp b/src/lib/sensor_calibration/Utilities.cpp
+index dd3f2d8cb2..80d618e92f 100644
+--- a/src/lib/sensor_calibration/Utilities.cpp
++++ b/src/lib/sensor_calibration/Utilities.cpp
+@@ -1,6 +1,6 @@
+ /****************************************************************************
+  *
+- *   Copyright (c) 2020-2021 PX4 Development Team. All rights reserved.
++ *   Copyright (c) 2020-2022 PX4 Development Team. All rights reserved.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -63,8 +63,8 @@ int8_t FindCurrentCalibrationIndex(const char *sensor_type, uint32_t device_id)
+ 	}
+
+ 	for (unsigned i = 0; i < MAX_SENSOR_COUNT; ++i) {
+-		char str[20] {};
+-		sprintf(str, "CAL_%s%u_ID", sensor_type, i);
++		char str[16 + 1] {};
++		snprintf(str, sizeof(str), "CAL_%s%u_ID", sensor_type, i);
+
+ 		int32_t device_id_val = 0;
+
+@@ -102,8 +102,8 @@ int8_t FindAvailableCalibrationIndex(const char *sensor_type, uint32_t device_id
+ 	uint32_t cal_device_ids[MAX_SENSOR_COUNT] {};
+
+ 	for (unsigned i = 0; i < MAX_SENSOR_COUNT; ++i) {
+-		char str[20] {};
+-		sprintf(str, "CAL_%s%u_ID", sensor_type, i);
++		char str[16 + 1] {};
++		snprintf(str, sizeof(str), "CAL_%s%u_ID", sensor_type, i);
+ 		int32_t device_id_val = 0;
+
+ 		if (param_get(param_find_no_notification(str), &device_id_val) == PX4_OK) {
+@@ -137,8 +137,8 @@ int8_t FindAvailableCalibrationIndex(const char *sensor_type, uint32_t device_id
+ int32_t GetCalibrationParamInt32(const char *sensor_type, const char *cal_type, uint8_t instance)
+ {
+ 	// eg CAL_MAGn_ID/CAL_MAGn_ROT
+-	char str[20] {};
+-	sprintf(str, "CAL_%s%" PRIu8 "_%s", sensor_type, instance, cal_type);
++	char str[16 + 1] {};
++	snprintf(str, sizeof(str), "CAL_%s%" PRIu8 "_%s", sensor_type, instance, cal_type);
+
+ 	int32_t value = 0;
+
+@@ -152,8 +152,8 @@ int32_t GetCalibrationParamInt32(const char *sensor_type, const char *cal_type,
+ float GetCalibrationParamFloat(const char *sensor_type, const char *cal_type, uint8_t instance)
+ {
+ 	// eg CAL_BAROn_OFF
+-	char str[20] {};
+-	sprintf(str, "CAL_%s%" PRIu8 "_%s", sensor_type, instance, cal_type);
++	char str[16 + 1] {};
++	snprintf(str, sizeof(str), "CAL_%s%" PRIu8 "_%s", sensor_type, instance, cal_type);
+
+ 	float value = NAN;
+
+@@ -168,13 +168,13 @@ Vector3f GetCalibrationParamsVector3f(const char *sensor_type, const char *cal_t
+ {
+ 	Vector3f values{0.f, 0.f, 0.f};
+
+-	char str[20] {};
++	char str[16 + 1] {};
+
+ 	for (int axis = 0; axis < 3; axis++) {
+ 		char axis_char = 'X' + axis;
+
+ 		// eg CAL_MAGn_{X,Y,Z}OFF
+-		sprintf(str, "CAL_%s%" PRIu8 "_%c%s", sensor_type, instance, axis_char, cal_type);
++		snprintf(str, sizeof(str), "CAL_%s%" PRIu8 "_%c%s", sensor_type, instance, axis_char, cal_type);
+
+ 		if (param_get(param_find(str), &values(axis)) != 0) {
+ 			PX4_ERR("failed to get %s", str);
+@@ -187,13 +187,13 @@ Vector3f GetCalibrationParamsVector3f(const char *sensor_type, const char *cal_t
+ bool SetCalibrationParamsVector3f(const char *sensor_type, const char *cal_type, uint8_t instance, Vector3f values)
+ {
+ 	int ret = PX4_OK;
+-	char str[20] {};
++	char str[16 + 1] {};
+
+ 	for (int axis = 0; axis < 3; axis++) {
+ 		char axis_char = 'X' + axis;
+
+ 		// eg CAL_MAGn_{X,Y,Z}OFF
+-		sprintf(str, "CAL_%s%" PRIu8 "_%c%s", sensor_type, instance, axis_char, cal_type);
++		snprintf(str, sizeof(str), "CAL_%s%" PRIu8 "_%c%s", sensor_type, instance, axis_char, cal_type);
+
+ 		if (param_set_no_notification(param_find(str), &values(axis)) != 0) {
+ 			PX4_ERR("failed to set %s = %.4f", str, (double)values(axis));
+diff --git a/src/lib/sensor_calibration/Utilities.hpp b/src/lib/sensor_calibration/Utilities.hpp
+index 4696f01f36..fc5b938a3c 100644
+--- a/src/lib/sensor_calibration/Utilities.hpp
++++ b/src/lib/sensor_calibration/Utilities.hpp
+@@ -1,6 +1,6 @@
+ /****************************************************************************
+  *
+- *   Copyright (c) 2020 PX4 Development Team. All rights reserved.
++ *   Copyright (c) 2020-2022 PX4 Development Team. All rights reserved.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -85,10 +85,10 @@ float GetCalibrationParamFloat(const char *sensor_type, const char *cal_type, ui
+ template<typename T>
+ bool SetCalibrationParam(const char *sensor_type, const char *cal_type, uint8_t instance, T value)
+ {
+-	char str[20] {};
++	char str[16 + 1] {};
+
+ 	// eg CAL_MAGn_ID/CAL_MAGn_ROT
+-	sprintf(str, "CAL_%s%u_%s", sensor_type, instance, cal_type);
++	snprintf(str, sizeof(str), "CAL_%s%u_%s", sensor_type, instance, cal_type);
+
+ 	int ret = param_set_no_notification(param_find(str), &value);
+
+diff --git a/src/lib/version/version.c b/src/lib/version/version.c
+index f0b137661b..fc7c899b51 100644
+--- a/src/lib/version/version.c
++++ b/src/lib/version/version.c
+@@ -354,12 +354,14 @@ const char *px4_ecl_lib_version_string(void)
+ #endif
+ }
+
+-#ifdef MAVLINK_LIB_GIT_VERSION_BINARY
+ uint64_t px4_mavlink_lib_version_binary(void)
+ {
++#ifdef MAVLINK_LIB_GIT_VERSION_BINARY
+ 	return MAVLINK_LIB_GIT_VERSION_BINARY;
++#else
++	return 0;
++#endif
+ }
+-#endif /* MAVLINK_LIB_GIT_VERSION_BINARY */
+
+ uint64_t px4_os_version_binary(void)
+ {
+@@ -374,4 +376,3 @@ const char *px4_firmware_oem_version_string(void)
+ {
+ 	return PX4_GIT_OEM_VERSION_STR;
+ }
+-
+diff --git a/src/modules/commander/HealthAndArmingChecks/checks/rcCalibrationCheck.cpp b/src/modules/commander/HealthAndArmingChecks/checks/rcCalibrationCheck.cpp
+index 90f210ed66..fed8a459e4 100644
+--- a/src/modules/commander/HealthAndArmingChecks/checks/rcCalibrationCheck.cpp
++++ b/src/modules/commander/HealthAndArmingChecks/checks/rcCalibrationCheck.cpp
+@@ -50,19 +50,19 @@
+
+ RcCalibrationChecks::RcCalibrationChecks()
+ {
+-	char nbuf[20];
++	char nbuf[16 + 1];
+
+ 	for (unsigned i = 0; i < input_rc_s::RC_INPUT_MAX_CHANNELS; i++) {
+-		sprintf(nbuf, "RC%d_MIN", i + 1);
++		snprintf(nbuf, sizeof(nbuf), "RC%d_MIN", i + 1);
+ 		_param_handles[i].min = param_find(nbuf);
+
+-		sprintf(nbuf, "RC%d_TRIM", i + 1);
++		snprintf(nbuf, sizeof(nbuf), "RC%d_TRIM", i + 1);
+ 		_param_handles[i].trim = param_find(nbuf);
+
+-		sprintf(nbuf, "RC%d_MAX", i + 1);
++		snprintf(nbuf, sizeof(nbuf), "RC%d_MAX", i + 1);
+ 		_param_handles[i].max = param_find(nbuf);
+
+-		sprintf(nbuf, "RC%d_DZ", i + 1);
++		snprintf(nbuf, sizeof(nbuf), "RC%d_DZ", i + 1);
+ 		_param_handles[i].dz = param_find(nbuf);
+ 	}
+
+diff --git a/src/modules/mavlink/CMakeLists.txt b/src/modules/mavlink/CMakeLists.txt
+index 8f5f6231af..886678ad5a 100644
+--- a/src/modules/mavlink/CMakeLists.txt
++++ b/src/modules/mavlink/CMakeLists.txt
+@@ -35,7 +35,14 @@ set(MAVLINK_GIT_DIR "${CMAKE_CURRENT_LIST_DIR}/mavlink")
+ set(MAVLINK_LIBRARY_DIR "${CMAKE_BINARY_DIR}/mavlink")
+ file(RELATIVE_PATH MAVLINK_GIT_DIR_RELATIVE ${CMAKE_SOURCE_DIR} ${MAVLINK_GIT_DIR})
+
+-px4_add_git_submodule(TARGET git_mavlink_v2 PATH "${MAVLINK_GIT_DIR}")
++if(EXISTS "${MAVLINK_GIT_DIR}/.git")
++	px4_add_git_submodule(TARGET git_mavlink_v2 PATH "${MAVLINK_GIT_DIR}")
++else()
++	# This fork vendors MAVLink directly instead of using a git submodule.
++	# Keep the dependency target expected by the generation commands without
++	# requiring a nested .git file that a vendored source tree does not have.
++	add_custom_target(git_mavlink_v2)
++endif()
+
+ # always generate uAvionix dialect
+ set(MAVLINK_DIALECT_UAVIONIX "uAvionix")
+diff --git a/src/modules/mavlink/mavlink_shell.cpp b/src/modules/mavlink/mavlink_shell.cpp
+index 4ff139d0d7..deb5286dfd 100644
+--- a/src/modules/mavlink/mavlink_shell.cpp
++++ b/src/modules/mavlink/mavlink_shell.cpp
+@@ -121,8 +121,8 @@ int MavlinkShell::start()
+
+ 	char r_in[32];
+ 	char r_out[32];
+-	sprintf(r_in, "%d", remote_in_fd);
+-	sprintf(r_out, "%d", remote_out_fd);
++	snprintf(r_in, sizeof(r_in), "%d", remote_in_fd);
++	snprintf(r_out, sizeof(r_out), "%d", remote_out_fd);
+ 	char *const argv[3] = {r_in, r_out, nullptr};
+
+ #else
+diff --git a/src/modules/rc_update/rc_update.cpp b/src/modules/rc_update/rc_update.cpp
+index 6a706035c9..cea34f4b36 100644
+--- a/src/modules/rc_update/rc_update.cpp
++++ b/src/modules/rc_update/rc_update.cpp
+@@ -69,26 +69,26 @@ RCUpdate::RCUpdate() :
+ {
+ 	// initialize parameter handles
+ 	for (unsigned i = 0; i < RC_MAX_CHAN_COUNT; i++) {
+-		char nbuf[16];
++		char nbuf[16 + 1];
+
+ 		/* min values */
+-		sprintf(nbuf, "RC%d_MIN", i + 1);
++		snprintf(nbuf, sizeof(nbuf), "RC%d_MIN", i + 1);
+ 		_parameter_handles.min[i] = param_find(nbuf);
+
+ 		/* trim values */
+-		sprintf(nbuf, "RC%d_TRIM", i + 1);
++		snprintf(nbuf, sizeof(nbuf), "RC%d_TRIM", i + 1);
+ 		_parameter_handles.trim[i] = param_find(nbuf);
+
+ 		/* max values */
+-		sprintf(nbuf, "RC%d_MAX", i + 1);
++		snprintf(nbuf, sizeof(nbuf), "RC%d_MAX", i + 1);
+ 		_parameter_handles.max[i] = param_find(nbuf);
+
+ 		/* channel reverse */
+-		sprintf(nbuf, "RC%d_REV", i + 1);
++		snprintf(nbuf, sizeof(nbuf), "RC%d_REV", i + 1);
+ 		_parameter_handles.rev[i] = param_find(nbuf);
+
+ 		/* channel deadzone */
+-		sprintf(nbuf, "RC%d_DZ", i + 1);
++		snprintf(nbuf, sizeof(nbuf), "RC%d_DZ", i + 1);
+ 		_parameter_handles.dz[i] = param_find(nbuf);
+ 	}
+
+diff --git a/src/modules/simulation/simulator_mavlink/sitl_targets_gazebo-classic.cmake b/src/modules/simulation/simulator_mavlink/sitl_targets_gazebo-classic.cmake
+index 7b73e03f75..20e65a217d 100644
+--- a/src/modules/simulation/simulator_mavlink/sitl_targets_gazebo-classic.cmake
++++ b/src/modules/simulation/simulator_mavlink/sitl_targets_gazebo-classic.cmake
+@@ -1,4 +1,54 @@
+
++set(gazebo_classic_external_cmake_args)
++
++if(APPLE)
++	# The current OpenCV formula links against a newer Protobuf than Gazebo
++	# Classic. Drop unused dylibs so non-camera models do not load both ABIs.
++	list(APPEND gazebo_classic_external_cmake_args
++		"-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-dead_strip_dylibs")
++endif()
++
++if(APPLE AND EXISTS "/usr/local/opt/boost@1.85.0")
++	# Gazebo Classic's Intel Homebrew formula uses a keg-only Boost version,
++	# which is not discoverable from the default CMake search paths.
++	list(PREPEND CMAKE_PREFIX_PATH "/usr/local/opt/boost@1.85.0")
++	list(APPEND gazebo_classic_external_cmake_args
++		"-DCMAKE_PREFIX_PATH=/usr/local/opt/boost@1.85.0")
++endif()
++
++if(APPLE AND EXISTS "/usr/local/opt/ogre1.9-with-boost1.85")
++	set(ogre_prefix "/usr/local/opt/ogre1.9-with-boost1.85")
++	list(PREPEND CMAKE_MODULE_PATH "${ogre_prefix}/share/OGRE/cmake/modules")
++	set(ENV{PKG_CONFIG_PATH} "${ogre_prefix}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
++	list(APPEND gazebo_classic_external_cmake_args
++		"-DCMAKE_MODULE_PATH=${ogre_prefix}/share/OGRE/cmake/modules"
++		"-DOGRE_HOME=${ogre_prefix}")
++endif()
++
++if(APPLE AND EXISTS "/usr/local/opt/protobuf@29")
++	set(protobuf_prefix "/usr/local/opt/protobuf@29")
++	set(Protobuf_DIR "${protobuf_prefix}/lib/cmake/protobuf")
++	list(PREPEND CMAKE_PREFIX_PATH "${protobuf_prefix}")
++	list(APPEND gazebo_classic_external_cmake_args
++		"-DProtobuf_DIR=${Protobuf_DIR}"
++		"-DProtobuf_PROTOC_EXECUTABLE=${protobuf_prefix}/bin/protoc"
++		"-DProtobuf_INCLUDE_DIR=${protobuf_prefix}/include"
++		"-DProtobuf_LIBRARY=${protobuf_prefix}/lib/libprotobuf.dylib"
++		"-DCMAKE_CXX_FLAGS=-DTIXML_USE_STL -iquote${protobuf_prefix}/include")
++endif()
++
++if(APPLE AND EXISTS "/usr/local/opt/opencv@4")
++	list(APPEND gazebo_classic_external_cmake_args
++		"-DOpenCV_DIR=/usr/local/opt/opencv@4/lib/cmake/opencv4")
++endif()
++
++if(APPLE AND EXISTS "/usr/local/opt/tinyxml1")
++	list(APPEND gazebo_classic_external_cmake_args
++		"-DTinyXML_ROOT_DIR=/usr/local/opt/tinyxml1"
++		"-DTinyXML_INCLUDE_DIR=/usr/local/opt/tinyxml1/include"
++		"-DTinyXML_LIBRARY=/usr/local/opt/tinyxml1/lib/libtinyxml.dylib")
++endif()
++
+ find_package(gazebo
+ 	QUIET
+ )
+@@ -48,8 +98,11 @@ if(gazebo_FOUND)
+ 		SOURCE_DIR ${PX4_SOURCE_DIR}/Tools/simulation/gazebo-classic/sitl_gazebo-classic
+ 		CMAKE_ARGS
+ 			-DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
++			-DCMAKE_POLICY_VERSION_MINIMUM=3.5
++			-DPYTHON_EXECUTABLE=${PYTHON_EXECUTABLE}
+ 			-DSEND_ODOMETRY_DATA=ON
+ 			-DGENERATE_ROS_MODELS=ON
++			${gazebo_classic_external_cmake_args}
+ 		BINARY_DIR ${PX4_BINARY_DIR}/build_gazebo-classic
+ 		INSTALL_COMMAND ""
+ 		DEPENDS git_sitl_gazebo-classic
+diff --git a/src/modules/temperature_compensation/TemperatureCompensation.cpp b/src/modules/temperature_compensation/TemperatureCompensation.cpp
+index 9dbdd7ee5e..36f1878bb9 100644
+--- a/src/modules/temperature_compensation/TemperatureCompensation.cpp
++++ b/src/modules/temperature_compensation/TemperatureCompensation.cpp
+@@ -49,7 +49,7 @@ namespace temperature_compensation
+
+ int TemperatureCompensation::initialize_parameter_handles(ParameterHandles &parameter_handles)
+ {
+-	char nbuf[16] {};
++	char nbuf[16 + 1] {};
+ 	int ret = PX4_ERROR;
+
+ 	/* rate gyro calibration parameters */
+@@ -59,25 +59,25 @@ int TemperatureCompensation::initialize_parameter_handles(ParameterHandles &para
+
+ 	if (ret == PX4_OK && gyro_tc_enabled) {
+ 		for (unsigned j = 0; j < GYRO_COUNT_MAX; j++) {
+-			sprintf(nbuf, "TC_G%d_ID", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_G%d_ID", j);
+ 			parameter_handles.gyro_cal_handles[j].ID = param_find(nbuf);
+
+ 			for (unsigned i = 0; i < 3; i++) {
+-				sprintf(nbuf, "TC_G%d_X3_%d", j, i);
++				snprintf(nbuf, sizeof(nbuf),  "TC_G%d_X3_%d", j, i);
+ 				parameter_handles.gyro_cal_handles[j].x3[i] = param_find(nbuf);
+-				sprintf(nbuf, "TC_G%d_X2_%d", j, i);
++				snprintf(nbuf, sizeof(nbuf),  "TC_G%d_X2_%d", j, i);
+ 				parameter_handles.gyro_cal_handles[j].x2[i] = param_find(nbuf);
+-				sprintf(nbuf, "TC_G%d_X1_%d", j, i);
++				snprintf(nbuf, sizeof(nbuf),  "TC_G%d_X1_%d", j, i);
+ 				parameter_handles.gyro_cal_handles[j].x1[i] = param_find(nbuf);
+-				sprintf(nbuf, "TC_G%d_X0_%d", j, i);
++				snprintf(nbuf, sizeof(nbuf),  "TC_G%d_X0_%d", j, i);
+ 				parameter_handles.gyro_cal_handles[j].x0[i] = param_find(nbuf);
+ 			}
+
+-			sprintf(nbuf, "TC_G%d_TREF", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_G%d_TREF", j);
+ 			parameter_handles.gyro_cal_handles[j].ref_temp = param_find(nbuf);
+-			sprintf(nbuf, "TC_G%d_TMIN", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_G%d_TMIN", j);
+ 			parameter_handles.gyro_cal_handles[j].min_temp = param_find(nbuf);
+-			sprintf(nbuf, "TC_G%d_TMAX", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_G%d_TMAX", j);
+ 			parameter_handles.gyro_cal_handles[j].max_temp = param_find(nbuf);
+ 		}
+ 	}
+@@ -89,25 +89,25 @@ int TemperatureCompensation::initialize_parameter_handles(ParameterHandles &para
+
+ 	if (ret == PX4_OK && accel_tc_enabled) {
+ 		for (unsigned j = 0; j < ACCEL_COUNT_MAX; j++) {
+-			sprintf(nbuf, "TC_A%d_ID", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_A%d_ID", j);
+ 			parameter_handles.accel_cal_handles[j].ID = param_find(nbuf);
+
+ 			for (unsigned i = 0; i < 3; i++) {
+-				sprintf(nbuf, "TC_A%d_X3_%d", j, i);
++				snprintf(nbuf, sizeof(nbuf),  "TC_A%d_X3_%d", j, i);
+ 				parameter_handles.accel_cal_handles[j].x3[i] = param_find(nbuf);
+-				sprintf(nbuf, "TC_A%d_X2_%d", j, i);
++				snprintf(nbuf, sizeof(nbuf),  "TC_A%d_X2_%d", j, i);
+ 				parameter_handles.accel_cal_handles[j].x2[i] = param_find(nbuf);
+-				sprintf(nbuf, "TC_A%d_X1_%d", j, i);
++				snprintf(nbuf, sizeof(nbuf),  "TC_A%d_X1_%d", j, i);
+ 				parameter_handles.accel_cal_handles[j].x1[i] = param_find(nbuf);
+-				sprintf(nbuf, "TC_A%d_X0_%d", j, i);
++				snprintf(nbuf, sizeof(nbuf),  "TC_A%d_X0_%d", j, i);
+ 				parameter_handles.accel_cal_handles[j].x0[i] = param_find(nbuf);
+ 			}
+
+-			sprintf(nbuf, "TC_A%d_TREF", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_A%d_TREF", j);
+ 			parameter_handles.accel_cal_handles[j].ref_temp = param_find(nbuf);
+-			sprintf(nbuf, "TC_A%d_TMIN", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_A%d_TMIN", j);
+ 			parameter_handles.accel_cal_handles[j].min_temp = param_find(nbuf);
+-			sprintf(nbuf, "TC_A%d_TMAX", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_A%d_TMAX", j);
+ 			parameter_handles.accel_cal_handles[j].max_temp = param_find(nbuf);
+ 		}
+ 	}
+@@ -119,25 +119,25 @@ int TemperatureCompensation::initialize_parameter_handles(ParameterHandles &para
+
+ 	if (ret == PX4_OK && baro_tc_enabled) {
+ 		for (unsigned j = 0; j < BARO_COUNT_MAX; j++) {
+-			sprintf(nbuf, "TC_B%d_ID", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_ID", j);
+ 			parameter_handles.baro_cal_handles[j].ID = param_find(nbuf);
+-			sprintf(nbuf, "TC_B%d_X5", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_X5", j);
+ 			parameter_handles.baro_cal_handles[j].x5 = param_find(nbuf);
+-			sprintf(nbuf, "TC_B%d_X4", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_X4", j);
+ 			parameter_handles.baro_cal_handles[j].x4 = param_find(nbuf);
+-			sprintf(nbuf, "TC_B%d_X3", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_X3", j);
+ 			parameter_handles.baro_cal_handles[j].x3 = param_find(nbuf);
+-			sprintf(nbuf, "TC_B%d_X2", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_X2", j);
+ 			parameter_handles.baro_cal_handles[j].x2 = param_find(nbuf);
+-			sprintf(nbuf, "TC_B%d_X1", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_X1", j);
+ 			parameter_handles.baro_cal_handles[j].x1 = param_find(nbuf);
+-			sprintf(nbuf, "TC_B%d_X0", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_X0", j);
+ 			parameter_handles.baro_cal_handles[j].x0 = param_find(nbuf);
+-			sprintf(nbuf, "TC_B%d_TREF", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_TREF", j);
+ 			parameter_handles.baro_cal_handles[j].ref_temp = param_find(nbuf);
+-			sprintf(nbuf, "TC_B%d_TMIN", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_TMIN", j);
+ 			parameter_handles.baro_cal_handles[j].min_temp = param_find(nbuf);
+-			sprintf(nbuf, "TC_B%d_TMAX", j);
++			snprintf(nbuf, sizeof(nbuf),  "TC_B%d_TMAX", j);
+ 			parameter_handles.baro_cal_handles[j].max_temp = param_find(nbuf);
+ 		}
+ 	}
+diff --git a/src/modules/temperature_compensation/temperature_calibration/accel.cpp b/src/modules/temperature_compensation/temperature_calibration/accel.cpp
+index 9dc6c071f8..c807bb5e91 100644
+--- a/src/modules/temperature_compensation/temperature_calibration/accel.cpp
++++ b/src/modules/temperature_compensation/temperature_calibration/accel.cpp
+@@ -204,7 +204,7 @@ int TemperatureCalibrationAccel::finish_sensor_instance(PerSensorData &data, int
+ 		 (double)res[2][3]);
+ 	data.tempcal_complete = true;
+
+-	char str[30];
++	char str[16 + 1];
+ 	float param = 0.0f;
+ 	int result = PX4_OK;
+
+@@ -212,7 +212,7 @@ int TemperatureCalibrationAccel::finish_sensor_instance(PerSensorData &data, int
+
+ 	for (unsigned axis_index = 0; axis_index < 3; axis_index++) {
+ 		for (unsigned coef_index = 0; coef_index <= 3; coef_index++) {
+-			sprintf(str, "TC_A%d_X%d_%d", sensor_index, 3 - coef_index, axis_index);
++			snprintf(str, sizeof(str), "TC_A%d_X%d_%d", sensor_index, 3 - coef_index, axis_index);
+ 			param = (float)res[axis_index][coef_index];
+ 			result = param_set_no_notification(param_find(str), &param);
+
+diff --git a/src/modules/temperature_compensation/temperature_calibration/baro.cpp b/src/modules/temperature_compensation/temperature_calibration/baro.cpp
+index 4d1dc7be90..6a4e114582 100644
+--- a/src/modules/temperature_compensation/temperature_calibration/baro.cpp
++++ b/src/modules/temperature_compensation/temperature_calibration/baro.cpp
+@@ -190,14 +190,14 @@ int TemperatureCalibrationBaro::finish_sensor_instance(PerSensorData &data, int
+ 		 (double)res[1], (double)res[2], (double)res[3], (double)res[4], (double)res[5]);
+ 	data.tempcal_complete = true;
+
+-	char str[30];
++	char str[16 + 1];
+ 	float param = 0.0f;
+ 	int result = PX4_OK;
+
+ 	set_parameter("TC_B%d_ID", sensor_index, &data.device_id);
+
+ 	for (unsigned coef_index = 0; coef_index <= POLYFIT_ORDER; coef_index++) {
+-		sprintf(str, "TC_B%d_X%d", sensor_index, (POLYFIT_ORDER - coef_index));
++		snprintf(str, sizeof(str), "TC_B%d_X%d", sensor_index, (POLYFIT_ORDER - coef_index));
+ 		param = (float)res[coef_index];
+ 		result = param_set_no_notification(param_find(str), &param);
+
+diff --git a/src/modules/temperature_compensation/temperature_calibration/common.h b/src/modules/temperature_compensation/temperature_calibration/common.h
+index 442ed01af3..815d0bcd67 100644
+--- a/src/modules/temperature_compensation/temperature_calibration/common.h
++++ b/src/modules/temperature_compensation/temperature_calibration/common.h
+@@ -96,8 +96,8 @@ protected:
+
+ int TemperatureCalibrationBase::set_parameter(const char *format_str, unsigned index, const void *value)
+ {
+-	char param_str[30] {};
+-	(void)sprintf(param_str, format_str, index);
++	char param_str[16 + 1] {};
++	snprintf(param_str, sizeof(param_str), format_str, index);
+ 	int result = param_set_no_notification(param_find(param_str), value);
+
+ 	if (result != 0) {
+diff --git a/src/modules/temperature_compensation/temperature_calibration/gyro.cpp b/src/modules/temperature_compensation/temperature_calibration/gyro.cpp
+index 0f0f9c4a1e..60ff34a5d1 100644
+--- a/src/modules/temperature_compensation/temperature_calibration/gyro.cpp
++++ b/src/modules/temperature_compensation/temperature_calibration/gyro.cpp
+@@ -189,7 +189,7 @@ int TemperatureCalibrationGyro::finish_sensor_instance(PerSensorData &data, int
+ 		 (double)res[2][3]);
+ 	data.tempcal_complete = true;
+
+-	char str[30] {};
++	char str[16 + 1] {};
+ 	float param = 0.0f;
+ 	int result = PX4_OK;
+
+@@ -197,7 +197,7 @@ int TemperatureCalibrationGyro::finish_sensor_instance(PerSensorData &data, int
+
+ 	for (unsigned axis_index = 0; axis_index < 3; axis_index++) {
+ 		for (unsigned coef_index = 0; coef_index <= 3; coef_index++) {
+-			sprintf(str, "TC_G%d_X%d_%d", sensor_index, 3 - coef_index, axis_index);
++			snprintf(str, sizeof(str), "TC_G%d_X%d_%d", sensor_index, 3 - coef_index, axis_index);
+ 			param = (float)res[axis_index][coef_index];
+ 			result = param_set_no_notification(param_find(str), &param);
+
+diff --git a/src/systemcmds/tests/test_float.cpp b/src/systemcmds/tests/test_float.cpp
+index aaccf1a4f0..8316c5dbe2 100644
+--- a/src/systemcmds/tests/test_float.cpp
++++ b/src/systemcmds/tests/test_float.cpp
+@@ -89,7 +89,7 @@ bool FloatTest::singlePrecisionTests()
+ 		  fabsf(atan2f_ones - 0.785398163397448278999490867136f) < 2.0f * FLT_EPSILON);
+
+ 	char sbuf[30];
+-	sprintf(sbuf, "%8.4f", (double)0.553415f);
++	snprintf(sbuf, sizeof(sbuf), "%8.4f", (double)0.553415f);
+ 	ut_compare("sbuf[0]", sbuf[0], ' ');
+ 	ut_compare("sbuf[1]", sbuf[1], ' ');
+ 	ut_compare("sbuf[2]", sbuf[2], '0');
+@@ -100,7 +100,7 @@ bool FloatTest::singlePrecisionTests()
+ 	ut_compare("sbuf[7]", sbuf[7], '4');
+ 	ut_compare("sbuf[8]", sbuf[8], '\0');
+
+-	sprintf(sbuf, "%8.4f", (double) - 0.553415f);
++	snprintf(sbuf, sizeof(sbuf), "%8.4f", (double) - 0.553415f);
+ 	ut_compare("sbuf[0]", sbuf[0], ' ');
+ 	ut_compare("sbuf[1]", sbuf[1], '-');
+ 	ut_compare("sbuf[2]", sbuf[2], '0');
+@@ -144,7 +144,7 @@ bool FloatTest::doublePrecisionTests()
+
+
+ 	char sbuf[30];
+-	sprintf(sbuf, "%8.4f", 0.553415);
++	snprintf(sbuf, sizeof(sbuf), "%8.4f", 0.553415);
+ 	ut_compare("sbuf[0]", sbuf[0], ' ');
+ 	ut_compare("sbuf[1]", sbuf[1], ' ');
+ 	ut_compare("sbuf[2]", sbuf[2], '0');
+@@ -156,7 +156,7 @@ bool FloatTest::doublePrecisionTests()
+ 	ut_compare("sbuf[8]", sbuf[8], '\0');
+
+
+-	sprintf(sbuf, "%8.4f", -0.553415);
++	snprintf(sbuf, sizeof(sbuf), "%8.4f", -0.553415);
+ 	ut_compare("sbuf[0]", sbuf[0], ' ');
+ 	ut_compare("sbuf[1]", sbuf[1], '-');
+ 	ut_compare("sbuf[2]", sbuf[2], '0');
+diff --git a/src/systemcmds/tests/test_mount.cpp b/src/systemcmds/tests/test_mount.cpp
+index d7675714de..623fddd5bd 100644
+--- a/src/systemcmds/tests/test_mount.cpp
++++ b/src/systemcmds/tests/test_mount.cpp
+@@ -169,7 +169,7 @@ int test_mount(int argc, char *argv[])
+ 	}
+
+ 	char buf[64];
+-	(void)sprintf(buf, "TEST: %d %d ", it_left_fsync, it_left_abort);
++	snprintf(buf, sizeof(buf), "TEST: %d %d ", it_left_fsync, it_left_abort);
+ 	lseek(cmd_fd, 0, SEEK_SET);
+ 	write(cmd_fd, buf, strlen(buf) + 1);
+ 	fsync(cmd_fd);
+diff --git a/src/systemcmds/tests/test_uart_send.c b/src/systemcmds/tests/test_uart_send.c
+index ae37aa1e9b..55404d0ec6 100644
+--- a/src/systemcmds/tests/test_uart_send.c
++++ b/src/systemcmds/tests/test_uart_send.c
+@@ -80,7 +80,7 @@ int test_uart_send(int argc, char *argv[])
+ 	uint64_t start_time = hrt_absolute_time();
+
+ 	for (i = 0; i < 30000; i++) {
+-		n = sprintf(sample_test_uart, "SAMPLE #%d\n", i);
++		n = snprintf(sample_test_uart, sizeof(sample_test_uart), "SAMPLE #%d\n", i);
+ 		write(test_uart, sample_test_uart, n);
+ 	}
+

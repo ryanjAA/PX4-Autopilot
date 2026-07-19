@@ -63,6 +63,7 @@ posix-configs/SITL/init/test/*_generated
 *.gcov
 .coverage
 .coverage.*
+.venv/
 
 # KDevelop ignores
 .kdev4/*
