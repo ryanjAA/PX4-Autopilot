@@ -13,3 +13,6 @@ text eol=lf
 *.bin binary linguist-generated
 *.elf binary linguist-generated
 *.hex binary linguist-generated
+
+# Pinned upstream C templates are byte-exact inputs to the AAGS generator.
+generator/C/** -whitespace

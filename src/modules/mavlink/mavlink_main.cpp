@@ -57,6 +57,9 @@
 #include <px4_platform_common/events.h>
 
 #include <uORB/topics/event.h>
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+#include <uORB/topics/mavlink_m_task_decision.h>
+#endif
 #include "mavlink_receiver.h"
 #include "mavlink_main.h"
 
@@ -92,6 +95,74 @@ mavlink_status_t *mavlink_get_channel_status(uint8_t channel) { return mavlink_m
 mavlink_message_t *mavlink_get_channel_buffer(uint8_t channel) { return mavlink_module_instances[channel]->get_buffer(); }
 
 static void usage();
+
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+static int task_decision_command(int argc, char *argv[])
+{
+	if (argc < 3 || (strcmp(argv[2], "accept") != 0 && strcmp(argv[2], "reject") != 0)) {
+		PX4_ERR("usage: mavlink task {accept|reject} [task_instance] [task_msgid]");
+		return 1;
+	}
+
+	char *end = nullptr;
+	const unsigned long instance = argc > 3 ? strtoul(argv[3], &end, 10) : 0;
+
+	if (argc > 3 && (end == argv[3] || *end != '\0' || instance > UINT32_MAX)) {
+		PX4_ERR("invalid task instance");
+		return 1;
+	}
+
+	end = nullptr;
+	const unsigned long msgid = argc > 4 ? strtoul(argv[4], &end, 10) : 0;
+
+	if (argc > 4 && (end == argv[4] || *end != '\0' || msgid > UINT32_MAX)) {
+		PX4_ERR("invalid task message ID");
+		return 1;
+	}
+
+	int32_t system_id = 0;
+	const param_t system_id_param = param_find("MAV_SYS_ID");
+
+	if (system_id_param == PARAM_INVALID || param_get(system_id_param, &system_id) != PX4_OK
+	    || system_id <= 0 || system_id >= 255) {
+		PX4_ERR("MAV_SYS_ID is invalid");
+		return 1;
+	}
+
+	mavlink_m_task_decision_s decision{};
+	decision.timestamp = hrt_absolute_time();
+	decision.task_instance = static_cast<uint32_t>(instance);
+	decision.task_msgid = static_cast<uint32_t>(msgid);
+	decision.target_system = static_cast<uint8_t>(system_id);
+	decision.action = strcmp(argv[2], "accept") == 0
+		? mavlink_m_task_decision_s::ACTION_ACCEPT
+		: mavlink_m_task_decision_s::ACTION_REJECT;
+	// Keep one advertisement for the shell/UI command path. The topic is
+	// queued, and a stable publisher avoids creating a new advertiser handle
+	// for every operator decision.
+	static uORB::Publication<mavlink_m_task_decision_s> publication{ORB_ID(mavlink_m_task_decision)};
+
+	if (!publication.publish(decision)) {
+		PX4_ERR("failed to publish local MAVLink-M task decision");
+		return 1;
+	}
+
+	PX4_INFO("local MAVLink-M %s requested for sysid %ld task %lu msgid %lu",
+		 argv[2], static_cast<long>(system_id), instance, msgid);
+	return 0;
+}
+
+static bool mavlink_m_message_is_local_only(const uint32_t message_id)
+{
+	// The finalized messages have no MAVLink target fields. Treating them as
+	// ordinary broadcasts would leak route-bound task traffic onto every
+	// forwarding-enabled MAVLink instance.
+	return message_id == MAVLINK_MSG_ID_TRACK_IDENTITY
+	       || message_id == MAVLINK_MSG_ID_TARGET_CUE
+	       || message_id == MAVLINK_MSG_ID_TARGET_HANDOVER
+	       || message_id == MAVLINK_MSG_ID_MAVLINK_M_ACK;
+}
+#endif
 
 hrt_abstime Mavlink::_first_start_time = {0};
 
@@ -1014,6 +1085,12 @@ Mavlink::handle_message(const mavlink_message_t *msg)
 	/*
 	 *  NOTE: this is called from the receiver thread
 	 */
+
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	if (mavlink_m_message_is_local_only(msg->msgid)) {
+		return;
+	}
+#endif
 
 	if (get_forwarding_on()) {
 		/* forward any messages to other mavlink instances */
@@ -3259,6 +3336,10 @@ $ mavlink stream -u 14556 -s HIGHRES_IMU -r 50
 
 	PRINT_MODULE_USAGE_COMMAND_DESCR("boot_complete",
 					 "Enable sending of messages. (Must be) called as last step in startup script.");
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	PRINT_MODULE_USAGE_COMMAND_DESCR("task",
+					 "Local MAVLink-M cue decision: task {accept|reject} [task_instance] [task_msgid]");
+#endif
 
 }
 
@@ -3284,6 +3365,11 @@ extern "C" __EXPORT int mavlink_main(int argc, char *argv[])
 
 	} else if (!strcmp(argv[1], "stream")) {
 		return Mavlink::stream_command(argc, argv);
+
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	} else if (!strcmp(argv[1], "task")) {
+		return task_decision_command(argc, argv);
+#endif
 
 	} else if (!strcmp(argv[1], "boot_complete")) {
 		Mavlink::set_boot_complete();

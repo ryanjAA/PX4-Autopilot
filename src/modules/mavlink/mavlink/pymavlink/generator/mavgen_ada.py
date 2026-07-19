@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 parse a MAVLink protocol XML file and generate a python implementation
 
@@ -6,8 +6,6 @@ Copyright Andrii Fil root.fi36@gmail.com 2022
 Based on mavgen_python.py
 Released under GNU GPL version 3 or later
 '''
-from __future__ import print_function
-
 import os
 import math
 import shutil
@@ -158,7 +156,7 @@ package Mavlink.Messages is
 
     s = """   CRC_Extras : constant array (Interfaces.Unsigned_8'Range) of
      Interfaces.Unsigned_8 := \n     (""";
-    
+
     item_len = 0
     l = 6
     for m in msgs:
@@ -253,7 +251,7 @@ def repr_enum(enum, size):
         else:
             l = 1
         s += "%s => %i" % (normalize_entry_name(i.name).title().ljust(max_len), i.value)
-            
+
     s += ");\n"
 
     return s

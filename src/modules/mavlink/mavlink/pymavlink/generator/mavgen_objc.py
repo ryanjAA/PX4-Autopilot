@@ -1,12 +1,10 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 parse a MAVLink protocol XML file and generate an Objective-C implementation
 
 Copyright John Boiles 2013
 Released under GNU GPL version 3 or later
 '''
-from __future__ import print_function
-
 import os
 from . import mavparse, mavtemplate
 
@@ -47,7 +45,7 @@ ${{message_definition_files:#import "MV${name_camel_case}Messages.h"
  @param mavlink The MVMavlink object calling this method
  @param data NSData object containing the bytes to be sent
  */
-- (BOOL)mavlink:(MVMavlink *)mavlink shouldWriteData:(NSData *)data;
+- (MAV_BOOL)mavlink:(MVMavlink *)mavlink shouldWriteData:(NSData *)data;
 
 @end
 
@@ -72,7 +70,7 @@ ${{message_definition_files:#import "MV${name_camel_case}Messages.h"
  @param message Object conforming to the MVMessage protocol that represents the data to be sent
  @return YES if message sending was successful
  */
-- (BOOL)sendMessage:(id<MVMessage>)message;
+- (MAV_BOOL)sendMessage:(id<MVMessage>)message;
 
 @end
 ''', xml)
@@ -105,7 +103,7 @@ ${{message_definition_files:#import "MV${name_camel_case}Messages.h"
   }
 }
 
-- (BOOL)sendMessage:(id<MVMessage>)message {
+- (MAV_BOOL)sendMessage:(id<MVMessage>)message {
   return [_delegate mavlink:self shouldWriteData:[message data]];
 }
 
@@ -348,7 +346,7 @@ def generate_shared(basename, xml_list):
     # Sort messages by ID
     template_dict['message'] = sorted(template_dict['message'], key = lambda message : message.id)
 
-    # Add name_camel_case to each message object 
+    # Add name_camel_case to each message object
     for message in template_dict['message']:
         message.name_camel_case = camel_case_from_underscores(message.name_lower)
 
@@ -423,7 +421,7 @@ def generate_message_definitions(basename, xml):
         for f in m.fields:
             if not f.omit_arg:
                 m.arg_fields.append(f)
- 
+
     generate_message_definitions_h(directory, xml)
     for m in xml.message:
         generate_message(directory, m)

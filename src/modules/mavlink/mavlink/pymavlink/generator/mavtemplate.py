@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 simple templating system for mavlink generator
 
@@ -6,16 +6,15 @@ Copyright Andrew Tridgell 2011
 Released under GNU GPL version 3 or later
 '''
 
-from builtins import object
 
 from .mavparse import MAVParseError
 
 class MAVTemplate(object):
     '''simple templating system'''
     def __init__(self,
-                 start_var_token="${", 
-                 end_var_token="}", 
-                 start_rep_token="${{", 
+                 start_var_token="${",
+                 end_var_token="}",
+                 start_rep_token="${{",
                  end_rep_token="}}",
                  trim_leading_lf=True,
                  checkmissing=True):
@@ -69,7 +68,7 @@ class MAVTemplate(object):
         if checkmissing is None:
             checkmissing = self.checkmissing
 
-        # handle repititions
+        # handle repetitions
         while True:
             subidx = text.find(self.start_rep_token)
             if subidx == -1:
@@ -97,7 +96,7 @@ class MAVTemplate(object):
                 t1 = t1[:-1]
             t1 += part3
             text = t1
-                
+
         if trim_leading_lf:
             if text[0] == '\n':
                 text = text[1:]
