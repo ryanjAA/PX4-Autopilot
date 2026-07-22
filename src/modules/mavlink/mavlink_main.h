@@ -351,6 +351,7 @@ public:
 	void			handle_message(const mavlink_message_t *msg);
 
 	int			get_instance_id() const { return _instance_id; }
+	int			get_esad_arming_forwarding_instance() const { return _param_mav_m_esad_i.get(); }
 
 	/**
 	 * Enable / disable hardware flow control.
@@ -663,6 +664,7 @@ private:
 		(ParamBool<px4::params::MAV_FWDEXTSP>) _param_mav_fwdextsp,
 		(ParamBool<px4::params::MAV_HASH_CHK_EN>) _param_mav_hash_chk_en,
 		(ParamBool<px4::params::MAV_HB_FORW_EN>) _param_mav_hb_forw_en,
+		(ParamInt<px4::params::MAV_M_ESAD_I>) _param_mav_m_esad_i,
 		(ParamInt<px4::params::MAV_RADIO_TOUT>)      _param_mav_radio_timeout,
 		(ParamInt<px4::params::SYS_HITL>) _param_sys_hitl,
 		(ParamBool<px4::params::SYS_FAILURE_EN>) _param_sys_failure_injection_enabled

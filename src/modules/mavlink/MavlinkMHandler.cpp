@@ -56,6 +56,8 @@ static_assert(MAVLINK_MSG_ID_TARGET_HANDOVER_MIN_LEN == 207 && MAVLINK_MSG_ID_TA
 static_assert(MAVLINK_MSG_ID_MAVLINK_M_ACK_MIN_LEN == 69 && MAVLINK_MSG_ID_MAVLINK_M_ACK_LEN == 69,
 	      "unexpected finalized ACK layout");
 static_assert(MAV_CMD_USER_1 == 31010, "unexpected owner-control command id");
+static_assert(vehicle_command_s::VEHICLE_CMD_PX4_MAVLINK_M_FLY_THROUGH > UINT16_MAX,
+	      "MAVLink-M fly-through command must remain PX4-internal only");
 
 namespace
 {
@@ -74,6 +76,16 @@ constexpr uint32_t OwnerDecisionTaskMessage = MAVLINK_MSG_ID_TARGET_CUE;
 // flag does not broaden mode authority; it makes Commander and Navigator agree
 // on the guarded one-shot command.
 constexpr float RepositionChangeModeFlag = 1.f;
+constexpr float DefaultInterceptRadiusM = 25.f;
+constexpr float DefaultInterceptDwellS = 3.f;
+constexpr float DefaultInterceptDeltaZM = 100.f;
+constexpr float DefaultLoiterRadiusM = 80.f;
+constexpr float FixedWingLoiterMarginM = 10.f;
+constexpr float SetpointHorizontalToleranceM = 2.f;
+constexpr float SetpointAltitudeToleranceM = 1.f;
+constexpr hrt_abstime SetpointApplyTimeout = 2'000'000;
+constexpr hrt_abstime CompletionAckTimeout = 500'000;
+constexpr uint32_t InterceptTokenMaximum = INT32_MAX;
 // MAVLink 2 strips zero-valued payload suffixes even for non-extension fields.
 // Match AAGS by requiring the semantic prefix and letting the generated,
 // zero-initializing decoders reconstruct optional suffixes.
@@ -96,9 +108,73 @@ constexpr uint8_t sanitize_action(int32_t action)
 	       ? static_cast<uint8_t>(action) : ActionReceiptOnly;
 }
 
+constexpr bool valid_system_selector(int32_t selector)
+{
+	return selector == -1 || (selector >= 1 && selector <= UINT8_MAX);
+}
+
+constexpr bool system_selector_matches(int32_t selector, uint8_t system_id)
+{
+	return system_id != 0 && (selector == -1 || selector == system_id);
+}
+
+constexpr uint8_t persisted_system_selector(int32_t selector)
+{
+	// MAVLink system zero is invalid for an AAGS endpoint, so it is an
+	// unambiguous on-disk representation of the runtime -1 wildcard.
+	return selector == -1 ? 0 : static_cast<uint8_t>(selector);
+}
+
 constexpr int32_t sanitize_max_age(int32_t maximum_age_s)
 {
 	return maximum_age_s >= 0 && maximum_age_s <= 600 ? maximum_age_s : 30;
+}
+
+constexpr float absolute_value(float value)
+{
+	return value < 0.f ? -value : value;
+}
+
+constexpr bool approximately_equal(float first, float second)
+{
+	return absolute_value(first - second) < 0.001f;
+}
+
+bool float_value_changed(float previous, float current)
+{
+	if (PX4_ISFINITE(previous) != PX4_ISFINITE(current)) {
+		return true;
+	}
+
+	return PX4_ISFINITE(previous) && fabsf(previous - current) > FLT_EPSILON;
+}
+
+constexpr float sanitize_intercept_radius(float radius_m)
+{
+	return radius_m >= 1.f && radius_m <= 500.f ? radius_m : DefaultInterceptRadiusM;
+}
+
+constexpr float sanitize_intercept_dwell(float dwell_s)
+{
+	return dwell_s >= 0.f && dwell_s <= 60.f ? dwell_s : DefaultInterceptDwellS;
+}
+
+constexpr float sanitize_intercept_delta_z(float delta_z_m)
+{
+	return delta_z_m >= 0.f && delta_z_m <= 1'000.f ? delta_z_m : DefaultInterceptDeltaZM;
+}
+
+constexpr float effective_intercept_radius(float configured_radius_m, bool fixed_wing, float loiter_radius_m)
+{
+	const float fixed_wing_radius_m = absolute_value(loiter_radius_m) + FixedWingLoiterMarginM;
+	return fixed_wing && fixed_wing_radius_m > configured_radius_m ? fixed_wing_radius_m : configured_radius_m;
+}
+
+constexpr bool intercept_completion_allowed(bool task_valid, bool source_fresh, bool vehicle_safe,
+		bool setpoint_owned, bool fly_through_complete, bool dwell_complete, bool altitude_within_limit)
+{
+	return task_valid && source_fresh && vehicle_safe && setpoint_owned
+	       && fly_through_complete && dwell_complete && altitude_within_limit;
 }
 
 static_assert(sanitize_action(0) == 0, "receipt-only mode must remain inert");
@@ -106,16 +182,62 @@ static_assert(sanitize_action(1) == 1, "current-altitude reposition mode must re
 static_assert(sanitize_action(2) == 2, "explicit cue-altitude intercept mode must remain available");
 static_assert(sanitize_action(3) == 0, "unknown action modes must fail closed");
 static_assert(sanitize_action(15) == 0, "obsolete command bitmask must migrate fail-closed");
+static_assert(valid_system_selector(-1) && valid_system_selector(1) && valid_system_selector(255)
+	      && !valid_system_selector(0) && !valid_system_selector(256),
+	      "AAGS system selectors must be exact or the documented wildcard");
+static_assert(system_selector_matches(-1, 1) && system_selector_matches(-1, 255)
+	      && !system_selector_matches(-1, 0) && system_selector_matches(253, 253)
+	      && !system_selector_matches(253, 254),
+	      "system wildcard must preserve nonzero MAVLink identity checks");
+static_assert(persisted_system_selector(-1) == 0 && persisted_system_selector(255) == 255,
+	      "wildcard persistence encoding must not collide with a valid system ID");
 static_assert(sanitize_max_age(-1) == 30, "negative replay window must fail closed");
 static_assert(sanitize_max_age(601) == 30, "oversized replay window must fail closed");
 static_assert(sanitize_max_age(0) == 0 && sanitize_max_age(600) == 600,
 	      "documented replay-window bounds must remain valid");
+static_assert(approximately_equal(sanitize_intercept_radius(0.f), DefaultInterceptRadiusM)
+	      && approximately_equal(sanitize_intercept_radius(500.f), 500.f),
+	      "intercept radius bounds must fail closed");
+static_assert(approximately_equal(sanitize_intercept_dwell(-1.f), DefaultInterceptDwellS)
+	      && approximately_equal(sanitize_intercept_dwell(60.f), 60.f),
+	      "intercept dwell bounds must fail closed");
+static_assert(approximately_equal(sanitize_intercept_delta_z(-1.f), DefaultInterceptDeltaZM)
+	      && approximately_equal(sanitize_intercept_delta_z(1'000.f), 1'000.f),
+	      "intercept altitude-change bounds must fail closed");
+static_assert(approximately_equal(effective_intercept_radius(25.f, false, 80.f), 25.f)
+	      && approximately_equal(effective_intercept_radius(25.f, true, 80.f), 90.f)
+	      && approximately_equal(effective_intercept_radius(120.f, true, 80.f), 120.f),
+	      "fixed-wing post-crossing dwell must include loiter radius and margin");
+static_assert(intercept_completion_allowed(true, true, true, true, true, true, true),
+	      "all intercept completion gates should permit completion");
+static_assert(!intercept_completion_allowed(true, false, true, true, true, true, true)
+	      && !intercept_completion_allowed(true, true, false, true, true, true, true)
+	      && !intercept_completion_allowed(true, true, true, false, true, true, true)
+	      && !intercept_completion_allowed(true, true, true, true, false, true, true)
+	      && !intercept_completion_allowed(true, true, true, true, true, false, true)
+	      && !intercept_completion_allowed(true, true, true, true, true, true, false),
+	      "every intercept completion gate must fail closed");
 
 #ifdef PX4_STORAGEDIR
 constexpr const char *StatePath = PX4_STORAGEDIR "/mavlink_m_state.bin";
 constexpr const char *StateTempPath = PX4_STORAGEDIR "/.mavlink_m_state.tmp";
 constexpr const char *SigningKeyPath = PX4_STORAGEDIR "/mavlink_m_signing.key";
 #endif
+
+bool invalidate_persisted_state()
+{
+#ifdef PX4_STORAGEDIR
+	if (::unlink(StatePath) != 0 && errno != ENOENT) {
+		PX4_ERR("MAVLink-M state invalidation failed (%d)", errno);
+		return false;
+	}
+
+	if (::unlink(StateTempPath) != 0 && errno != ENOENT) {
+		PX4_WARN("MAVLink-M temporary state cleanup failed (%d)", errno);
+	}
+#endif
+	return true;
+}
 
 template<typename T>
 void get_parameter(param_t parameter, T &value)
@@ -219,6 +341,10 @@ MavlinkMHandler::MavlinkMHandler(Mavlink *mavlink) :
 	_param_rc_accept = param_find("MAV_M_RC_ACC");
 	_param_max_age = param_find("MAV_M_MAX_AGE");
 	_param_action = param_find("MAV_M_ACTION");
+	_param_intercept_radius = param_find("MAV_M_INT_RAD");
+	_param_intercept_dwell = param_find("MAV_M_INT_DWL");
+	_param_intercept_delta_z = param_find("MAV_M_INT_DZ");
+	_param_nav_loiter_radius = param_find("NAV_LOITER_RAD");
 	update_parameters();
 }
 
@@ -241,6 +367,16 @@ void MavlinkMHandler::update_parameters()
 	const int32_t previous_rc_channel = _rc_channel;
 	const int32_t previous_rc_reject = _rc_reject;
 	const int32_t previous_rc_accept = _rc_accept;
+	const int32_t previous_action_mode = _action_mode;
+	const float previous_intercept_radius = _intercept_radius_m;
+	const float previous_intercept_dwell = _intercept_dwell_s;
+	const float previous_intercept_delta_z = _intercept_delta_z_m;
+	const float previous_nav_loiter_radius = _nav_loiter_radius_m;
+	// Clearing a persisted predecessor-stop marker must use the endpoint header
+	// that owns the currently loaded state. Do this before reading any new route
+	// or source selector from the parameter store.
+	const bool deferred_navigation_stopped_before_parameter_read =
+		!_state_loaded || stop_deferred_navigation();
 
 	get_parameter(_param_mode, _mode);
 	get_parameter(_param_link_id, _link_id);
@@ -277,9 +413,113 @@ void MavlinkMHandler::update_parameters()
 		(void)param_set_no_notification(_param_action, &_action_mode);
 	}
 
+	get_parameter(_param_intercept_radius, _intercept_radius_m);
+	const float requested_intercept_radius = _intercept_radius_m;
+	_intercept_radius_m = sanitize_intercept_radius(requested_intercept_radius);
+
+	if (float_value_changed(requested_intercept_radius, _intercept_radius_m)
+	    && _param_intercept_radius != PARAM_INVALID) {
+		PX4_WARN("resetting invalid MAV_M_INT_RAD to %.1f m", static_cast<double>(_intercept_radius_m));
+		(void)param_set_no_notification(_param_intercept_radius, &_intercept_radius_m);
+	}
+
+	get_parameter(_param_intercept_dwell, _intercept_dwell_s);
+	const float requested_intercept_dwell = _intercept_dwell_s;
+	_intercept_dwell_s = sanitize_intercept_dwell(requested_intercept_dwell);
+
+	if (float_value_changed(requested_intercept_dwell, _intercept_dwell_s)
+	    && _param_intercept_dwell != PARAM_INVALID) {
+		PX4_WARN("resetting invalid MAV_M_INT_DWL to %.1f s", static_cast<double>(_intercept_dwell_s));
+		(void)param_set_no_notification(_param_intercept_dwell, &_intercept_dwell_s);
+	}
+
+	get_parameter(_param_intercept_delta_z, _intercept_delta_z_m);
+	const float requested_intercept_delta_z = _intercept_delta_z_m;
+	_intercept_delta_z_m = sanitize_intercept_delta_z(requested_intercept_delta_z);
+
+	if (float_value_changed(requested_intercept_delta_z, _intercept_delta_z_m)
+	    && _param_intercept_delta_z != PARAM_INVALID) {
+		PX4_WARN("resetting invalid MAV_M_INT_DZ to %.1f m", static_cast<double>(_intercept_delta_z_m));
+		(void)param_set_no_notification(_param_intercept_delta_z, &_intercept_delta_z_m);
+	}
+
+	get_parameter(_param_nav_loiter_radius, _nav_loiter_radius_m);
+
+	if (!PX4_ISFINITE(_nav_loiter_radius_m)
+	    || _nav_loiter_radius_m < 25.f || _nav_loiter_radius_m > 1'000.f) {
+		_nav_loiter_radius_m = DefaultLoiterRadiusM;
+	}
+
+	const bool endpoint_identity_changed = previous_instance != _instance
+					       || previous_source_system != _source_system
+					       || previous_source_component != _source_component;
+
+	if (_state_loaded && endpoint_identity_changed) {
+		const bool navigation_issued = (_active.command_flags & CommandNav) != 0;
+		const bool navigation_stopped = deferred_navigation_stopped_before_parameter_read
+					&& (!navigation_issued
+					|| (assignment_cancellation_ready(_active)
+					    && cancel_assignment_commands(_active)));
+		const bool state_invalidated = navigation_stopped && invalidate_persisted_state();
+
+		if (!state_invalidated) {
+			// Do not erase the only task record or permit an old state file to be
+			// resurrected later when navigation could not be stopped or invalidation
+			// failed. Restore the previous endpoint selector and require a retry.
+			_instance = previous_instance;
+			_source_system = previous_source_system;
+			_source_component = previous_source_component;
+			(void)param_set(_param_instance, &_instance);
+			(void)param_set(_param_source_system, &_source_system);
+			(void)param_set(_param_source_component, &_source_component);
+			PX4_ERR("MAVLink-M endpoint change blocked: active navigation or state could not be cleared");
+
+		} else {
+			clear_intercept_tracking();
+			_active = Assignment{};
+
+			for (Assignment &assignment : _inbox) {
+				assignment = Assignment{};
+			}
+
+			for (Assignment &assignment : _terminal) {
+				assignment = Assignment{};
+			}
+
+			for (ControlRecord &control : _controls) {
+				control = ControlRecord{};
+			}
+
+			for (TrackIdentity &identity : _track_identities) {
+				identity = TrackIdentity{};
+			}
+
+			_state_loaded = false;
+			memset(_source_last_seen, 0, sizeof(_source_last_seen));
+			_last_rc_position = RcPosition::Unknown;
+			_rc_center_latched = false;
+		}
+	}
+
+	const bool intercept_policy_changed = previous_action_mode != _action_mode
+					      || previous_mode != _mode
+					      || previous_instance != _instance
+					      || previous_source_system != _source_system
+					      || previous_source_component != _source_component
+					      || float_value_changed(previous_intercept_radius, _intercept_radius_m)
+					      || float_value_changed(previous_intercept_dwell, _intercept_dwell_s)
+					      || float_value_changed(previous_intercept_delta_z, _intercept_delta_z_m)
+					      || float_value_changed(previous_nav_loiter_radius, _nav_loiter_radius_m);
+
+	if (_intercept_phase != InterceptPhase::None
+	    && _intercept_phase != InterceptPhase::Aborted
+	    && intercept_policy_changed) {
+		abort_intercept("navigation policy changed", true);
+	}
+
 	const bool mode_valid = _mode >= 0 && _mode <= 2;
 	const bool instance_valid = _instance >= 0 && _instance < MAVLINK_COMM_NUM_BUFFERS;
-	const bool source_valid = _source_system >= 1 && _source_system <= UINT8_MAX
+	const bool source_valid = valid_system_selector(_source_system)
 				  && _source_component >= 1 && _source_component <= UINT8_MAX;
 	const bool signing_link_valid = _mode != 2 || (_link_id >= 0 && _link_id <= UINT8_MAX);
 	_endpoint_configuration_valid = mode_valid && instance_valid && source_valid && signing_link_valid;
@@ -287,16 +527,21 @@ void MavlinkMHandler::update_parameters()
 	const bool same_endpoint = _same_endpoint == 1;
 	const bool control_instance_valid = _control_instance >= 0
 					    && _control_instance < MAVLINK_COMM_NUM_BUFFERS;
-	const bool control_source_valid = _control_system >= 1 && _control_system <= UINT8_MAX
+	const bool control_source_valid = valid_system_selector(_control_system)
 					  && _control_component >= 1 && _control_component <= UINT8_MAX;
 	const bool same_route = _control_instance == _instance;
-	const bool same_authority = _control_system == _source_system
-				    && _control_component == _source_component;
+	const bool same_authority_selector = _control_system == _source_system
+					 && _control_component == _source_component;
+	const bool exact_authority_collision = _control_system != -1 && _source_system != -1
+					       && same_authority_selector;
 	// SAME_EP is deliberately all-or-nothing. Partial overlap would make it
 	// ambiguous which endpoint owns the durable task and its authoritative ACK.
+	// Separate endpoints remain separated by their configured physical MAVLink
+	// instances. A wildcard on either route intentionally permits overlapping
+	// system identities, while the exact component and route still apply.
 	const bool control_endpoint_relationship_valid = same_endpoint
-			? same_route && same_authority
-			: !same_route && !same_authority;
+			? same_route && same_authority_selector
+			: !same_route && !exact_authority_collision;
 	const bool control_signing_link_valid = _mode != 2
 						|| (_control_link_id >= 0 && _control_link_id <= UINT8_MAX
 						    && (same_endpoint
@@ -332,33 +577,6 @@ void MavlinkMHandler::update_parameters()
 		_rc_center_latched = false;
 	}
 
-	if (_state_loaded && (previous_instance != _instance
-			       || previous_source_system != _source_system
-			       || previous_source_component != _source_component)) {
-		_active = Assignment{};
-
-		for (Assignment &assignment : _inbox) {
-			assignment = Assignment{};
-		}
-
-		for (Assignment &assignment : _terminal) {
-			assignment = Assignment{};
-		}
-
-		for (ControlRecord &control : _controls) {
-			control = ControlRecord{};
-		}
-
-		for (TrackIdentity &identity : _track_identities) {
-			identity = TrackIdentity{};
-		}
-
-		_state_loaded = false;
-		_source_last_seen = 0;
-		_last_rc_position = RcPosition::Unknown;
-		_rc_center_latched = false;
-	}
-
 	(void)configure_signing();
 }
 
@@ -385,14 +603,20 @@ bool MavlinkMHandler::signing_required() const
 
 bool MavlinkMHandler::source_matches(const mavlink_message_t &message) const
 {
-	return message.sysid == static_cast<uint8_t>(_source_system)
+	return system_selector_matches(_source_system, message.sysid)
 	       && message.compid == static_cast<uint8_t>(_source_component);
 }
 
 bool MavlinkMHandler::control_source_matches(const mavlink_message_t &message) const
 {
-	return message.sysid == static_cast<uint8_t>(_control_system)
+	return system_selector_matches(_control_system, message.sysid)
 	       && message.compid == static_cast<uint8_t>(_control_component);
+}
+
+bool MavlinkMHandler::source_recent(uint8_t source_system) const
+{
+	return source_system != 0 && _source_last_seen[source_system] != 0
+	       && hrt_elapsed_time(&_source_last_seen[source_system]) < SourceFreshTimeout;
 }
 
 bool MavlinkMHandler::task_message_allowed(const mavlink_message_t &message) const
@@ -422,7 +646,7 @@ bool MavlinkMHandler::handle_message(const mavlink_message_t &message)
 	// source-fresh flag. Cue acceptance itself remains governed by the cue's
 	// persisted validity window, not by a removed private capability message.
 	if (source_matches(message)) {
-		_source_last_seen = hrt_absolute_time();
+		_source_last_seen[message.sysid] = hrt_absolute_time();
 	}
 
 	if (message.msgid != MAVLINK_MSG_ID_TRACK_IDENTITY
@@ -480,6 +704,7 @@ bool MavlinkMHandler::handle_control_command(const mavlink_message_t &message)
 	uint16_t cue_low = 0;
 	uint16_t cue_high = 0;
 	uint32_t task_message = 0;
+	uint16_t requested_effect = 0;
 	const bool command_shape_valid =
 		command.confirmation == 0
 		&& exact_unsigned_word(command.param1, &action_word)
@@ -487,10 +712,13 @@ bool MavlinkMHandler::handle_control_command(const mavlink_message_t &message)
 		&& exact_unsigned_word(command.param3, &cue_high)
 		&& exact_unsigned_value(command.param4, 0x00ffffffU, &task_message)
 		&& task_message == OwnerDecisionTaskMessage
-		&& fabsf(command.param5) <= 0.f
+		&& exact_unsigned_word(command.param5, &requested_effect)
+		&& requested_effect <= ActionInterceptCueAltitude
 		&& fabsf(command.param6) <= 0.f
 		&& fabsf(command.param7) <= 0.f
-		&& (action_word == OwnerDecisionAccept || action_word == OwnerDecisionReject);
+		&& (action_word == OwnerDecisionAccept || action_word == OwnerDecisionReject)
+		&& (action_word != OwnerDecisionReject
+		    || requested_effect == mavlink_m_task_decision_s::EFFECT_DEFAULT);
 	const uint32_t cue_id = static_cast<uint32_t>(cue_low)
 				| (static_cast<uint32_t>(cue_high) << 16U);
 
@@ -520,6 +748,18 @@ bool MavlinkMHandler::handle_control_command(const mavlink_message_t &message)
 		return true;
 	}
 
+	// MAV_M_ACTION is a local permission ceiling, not the per-cue selection.
+	// An explicit request may narrow that authority but may never broaden it.
+	if (action_word == OwnerDecisionAccept
+	    && requested_effect != mavlink_m_task_decision_s::EFFECT_DEFAULT
+	    && (_control_status.cue_type != MAVLINK_M_CUE_TYPE_INVESTIGATE
+		|| requested_effect > sanitize_action(_action_mode)
+		|| (requested_effect == mavlink_m_task_decision_s::EFFECT_INTERCEPT
+		    && !PX4_ISFINITE(_control_status.alt_msl_m)))) {
+		send_control_command_ack(message, MAV_RESULT_DENIED);
+		return true;
+	}
+
 	mavlink_m_task_decision_s decision{};
 	decision.timestamp = hrt_absolute_time();
 	decision.task_msgid = OwnerDecisionTaskMessage;
@@ -528,6 +768,7 @@ bool MavlinkMHandler::handle_control_command(const mavlink_message_t &message)
 	decision.action = action_word == OwnerDecisionAccept
 			  ? mavlink_m_task_decision_s::ACTION_ACCEPT
 			  : mavlink_m_task_decision_s::ACTION_REJECT;
+	decision.requested_effect = static_cast<uint8_t>(requested_effect);
 
 	if (!_task_decision_pub.publish(decision)) {
 		send_control_command_ack(message, MAV_RESULT_FAILED);
@@ -932,7 +1173,7 @@ MavlinkMHandler::ControlRecord *MavlinkMHandler::find_control(uint32_t control_i
 {
 	for (ControlRecord &control : _controls) {
 		if (control.control_id == control_id
-		    && control.source_system == static_cast<uint8_t>(_source_system)
+		    && system_selector_matches(_source_system, control.source_system)
 		    && control.source_component == static_cast<uint8_t>(_source_component)) {
 			return &control;
 		}
@@ -1038,6 +1279,15 @@ void MavlinkMHandler::store_assignment(const Assignment &candidate)
 		return;
 	}
 
+	// Owner decisions carry message ID and instance but no cue-source identity.
+	// Under a system wildcard, two sources using the same instance would make a
+	// later Accept/Reject ambiguous. Fail the second source closed instead of
+	// allowing an operator command to select whichever queue slot happens first.
+	if (find_task(candidate.message_id, candidate.instance_id) != nullptr) {
+		send_ack(candidate, MAVLINK_M_ACK_FAILED, "assignment instance ambiguous across sources");
+		return;
+	}
+
 	Assignment *slot = find_free_inbox();
 
 	if (slot == nullptr) {
@@ -1092,7 +1342,7 @@ void MavlinkMHandler::undo_remember_terminal(const Assignment &evicted)
 	_terminal[TerminalCapacity - 1] = evicted;
 }
 
-void MavlinkMHandler::accept_pending(uint32_t message_id, uint32_t instance_id)
+void MavlinkMHandler::accept_pending(uint32_t message_id, uint32_t instance_id, uint8_t requested_effect)
 {
 	Assignment *pending = find_pending(message_id, instance_id);
 
@@ -1102,8 +1352,47 @@ void MavlinkMHandler::accept_pending(uint32_t message_id, uint32_t instance_id)
 	}
 
 	const Assignment decided = *pending;
+
+	// A delayed safety hold for a superseded task must never be allowed to race
+	// a newly accepted command. Resolve and durably clear that obligation first.
+	if (!stop_deferred_navigation()) {
+		send_ack(decided, MAVLINK_M_ACK_RECEIVED,
+			 "acceptance blocked: previous navigation stop pending");
+		publish_status();
+		return;
+	}
+
 	const char *reason = nullptr;
 	uint8_t result = MAVLINK_M_ACK_FAILED;
+	const uint8_t permission_ceiling = sanitize_action(_action_mode);
+
+	if (requested_effect > mavlink_m_task_decision_s::EFFECT_INTERCEPT) {
+		send_ack(decided, MAVLINK_M_ACK_RECEIVED, "movement blocked: invalid requested effect");
+		return;
+	}
+
+	if (requested_effect != mavlink_m_task_decision_s::EFFECT_DEFAULT
+	    && (decided.message_id != MAVLINK_MSG_ID_TARGET_CUE
+		|| decided.cue_type != MAVLINK_M_CUE_TYPE_INVESTIGATE)) {
+		send_ack(decided, MAVLINK_M_ACK_RECEIVED, "movement blocked: requested effect requires INVESTIGATE cue");
+		return;
+	}
+
+	if (requested_effect == mavlink_m_task_decision_s::EFFECT_INTERCEPT
+	    && !PX4_ISFINITE(decided.alt)) {
+		send_ack(decided, MAVLINK_M_ACK_RECEIVED, "movement blocked: intercept requires finite cue altitude");
+		return;
+	}
+
+	const uint8_t execution_effect =
+		requested_effect == mavlink_m_task_decision_s::EFFECT_DEFAULT
+		? permission_ceiling : requested_effect;
+
+	if (requested_effect != mavlink_m_task_decision_s::EFFECT_DEFAULT
+	    && requested_effect > permission_ceiling) {
+		send_ack(decided, MAVLINK_M_ACK_RECEIVED, "movement blocked: requested effect exceeds MAV_M_ACTION");
+		return;
+	}
 
 	// Decisions are local, but their subject still has to be valid at the exact
 	// decision instant. This closes the race between deadline expiry and an RC
@@ -1113,38 +1402,81 @@ void MavlinkMHandler::accept_pending(uint32_t message_id, uint32_t instance_id)
 			expire_assignments(utc_now_usec());
 
 			// A persistence failure rolls expiry back. Never accept in that
-			// case; still tell the sender that the decision arrived too late.
+			// case. Report the still-durable Pending state rather than a
+			// terminal EXPIRED result that PX4 failed to persist.
 			if (find_pending(decided.message_id, decided.instance_id) != nullptr) {
-				send_ack(decided, result, reason);
+				send_ack(decided, MAVLINK_M_ACK_RECEIVED,
+					 "acceptance blocked: expiry storage failed; cue remains pending");
 			}
 
 		} else {
-			send_ack(decided, result, reason);
+			send_ack(decided, MAVLINK_M_ACK_RECEIVED,
+				 reason != nullptr ? reason : "acceptance blocked: cue remains pending");
 		}
 
 		return;
 	}
 
-	// One explicit local acceptance may own the active cue at a time. A second
-	// acceptance cannot mean "supersede" because the finalized shared profile
-	// has no supersession/lifecycle message. Keep the new cue Pending and its
-	// duplicate ACK at RECEIVED so clearing the active cue can never dispatch it
-	// without another deliberate local acceptance.
-	if (_active.state != AssignmentState::Empty) {
-		PX4_WARN("MAVLink-M accept blocked: active task %lu/%lu; pending task %lu/%lu requires a fresh decision",
-			 static_cast<unsigned long>(_active.message_id),
-			 static_cast<unsigned long>(_active.instance_id),
-			 static_cast<unsigned long>(decided.message_id),
-			 static_cast<unsigned long>(decided.instance_id));
+	Assignment candidate = decided;
+	candidate.state = AssignmentState::Active;
+	candidate.execution_effect = execution_effect;
+	const bool movement_requested = assignment_requests_movement(candidate);
+	const bool superseding = _active.state == AssignmentState::Active;
+
+	if (movement_requested) {
+		const char *movement_reason = nullptr;
+
+		// A movement decision is not an acceptance unless it can take effect at
+		// this exact instant. Keep the cue Pending so the operator can restore a
+		// safe flight state and make a new, explicit acceptance decision.
+		if (!movement_acceptance_ready(candidate, &movement_reason)) {
+			PX4_WARN("MAVLink-M movement acceptance blocked: %s",
+				 movement_reason != nullptr ? movement_reason : "navigation unavailable");
+			send_ack(decided, MAVLINK_M_ACK_RECEIVED,
+				 movement_reason != nullptr ? movement_reason : "movement command unavailable");
+			publish_status();
+			return;
+		}
+	}
+
+	// A nonmoving replacement of an issued navigation task must be able to stop
+	// the old command before any durable state changes. A moving replacement
+	// publishes its new command directly after the atomic state commit, which
+	// replaces the old Navigator setpoint without an intervening hold command.
+	if (superseding && !movement_requested && _active.command_flags != 0
+	    && !assignment_cancellation_ready(_active)) {
+		send_ack(decided, MAVLINK_M_ACK_RECEIVED,
+			 "acceptance blocked: cannot stop active navigation");
 		publish_status();
 		return;
 	}
 
 	const Assignment active_before = _active;
 	const Assignment inbox_before[2] {_inbox[0], _inbox[1]};
-	_active = decided;
-	_active.state = AssignmentState::Active;
-	_active.last_ack_result = MAVLINK_M_ACK_ACCEPTED;
+	const Assignment terminal_evicted = _terminal[TerminalCapacity - 1];
+	const InterceptTracking intercept_before = intercept_tracking();
+	Assignment superseded{};
+
+	if (superseding) {
+		superseded = active_before;
+
+		if ((superseded.command_flags & CommandNav) != 0) {
+			// This bit is the durable obligation to replace or stop the old
+			// navigation. It is cleared only in the same durable commit that
+			// confirms the replacement, or after a confirmed current-position
+			// hold. A module restart can therefore never lose the stop.
+			superseded.command_flags |= CommandStopPending;
+		}
+
+		++superseded.status_sequence;
+		remember_terminal(superseded, AssignmentState::Aborted, MAVLINK_M_ACK_REJECTED);
+	}
+
+	_active = candidate;
+	// Movement promotion is a durable intermediate state until navigation is
+	// actually published. Persist RECEIVED so a restart or duplicate replay can
+	// never claim acceptance for a command that was not issued.
+	_active.last_ack_result = movement_requested ? MAVLINK_M_ACK_RECEIVED : MAVLINK_M_ACK_ACCEPTED;
 	++_active.status_sequence;
 	remove_inbox(pending);
 
@@ -1152,14 +1484,166 @@ void MavlinkMHandler::accept_pending(uint32_t message_id, uint32_t instance_id)
 		_active = active_before;
 		_inbox[0] = inbox_before[0];
 		_inbox[1] = inbox_before[1];
-		send_ack(decided, MAVLINK_M_ACK_FAILED, "decision storage failed");
+
+		if (superseding) {
+			undo_remember_terminal(terminal_evicted);
+		}
+
+		restore_intercept_tracking(intercept_before);
+		send_ack(decided, MAVLINK_M_ACK_RECEIVED,
+			 superseding && movement_requested
+			 ? "movement blocked: storage failed; active retained"
+			 : "acceptance blocked: storage failed; cue pending");
+		return;
+	}
+
+	// These snapshots are the last known durable intermediate state. Movement
+	// remains RECEIVED until its command publishes and command flags persist.
+	const Assignment staged_active = _active;
+	const Assignment staged_inbox[2] {_inbox[0], _inbox[1]};
+	bool execution_applied = true;
+	CommandApplicationResult command_result = CommandApplicationResult::Applied;
+
+	if (movement_requested) {
+		command_result = command_active_assignment();
+		execution_applied = command_result == CommandApplicationResult::Applied;
+
+	} else if (superseding && active_before.command_flags != 0) {
+		execution_applied = cancel_assignment_commands(active_before);
+
+		if (execution_applied) {
+			clear_intercept_tracking();
+		}
+
+	} else if (superseding) {
+		clear_intercept_tracking();
+	}
+
+	if (execution_applied && superseding && !movement_requested
+	    && (active_before.command_flags & CommandNav) != 0) {
+		// The current-position hold has released the predecessor. Persist that
+		// release separately from the already durable nonmoving acceptance. A
+		// storage failure leaves the stop marker intact so update() can retry it.
+		Assignment *stop_marker = find_navigation_stop_marker();
+
+		if (stop_marker != nullptr) {
+			const uint8_t command_flags_before = stop_marker->command_flags;
+			stop_marker->command_flags &= static_cast<uint8_t>(~CommandStopPending);
+
+			if (!save_state()) {
+				stop_marker->command_flags = command_flags_before;
+				_deferred_navigation_stop = *stop_marker;
+				PX4_WARN("superseded navigation stopped but release marker storage failed");
+			}
+		}
+	}
+
+	const bool persistence_failed_after_publication =
+		command_result == CommandApplicationResult::PersistenceFailedAfterPublicationStopped
+		|| command_result == CommandApplicationResult::PersistenceFailedAfterPublicationStopUnconfirmed;
+
+	if (persistence_failed_after_publication) {
+		// The replacement command reached uORB, but its command flags could not be
+		// committed. When its stop command was published, keep RAM aligned with the
+		// last durable Active/Received stage. If that stop could not be published,
+		// retain the in-memory command flags and tracking so the UI cannot claim the
+		// navigation stopped and an explicit Abort can try again. In neither case may
+		// the old task be restored as Active after its navigation was replaced.
+		const bool navigation_stopped =
+			command_result == CommandApplicationResult::PersistenceFailedAfterPublicationStopped;
+
+		if (navigation_stopped) {
+			_active = staged_active;
+			_inbox[0] = staged_inbox[0];
+			_inbox[1] = staged_inbox[1];
+			clear_intercept_tracking();
+
+		} else {
+			_active.last_ack_result = MAVLINK_M_ACK_RECEIVED;
+		}
+
+		if (superseding) {
+			if (Assignment *stop_marker = find_navigation_stop_marker()) {
+				_deferred_navigation_stop = *stop_marker;
+			}
+
+			send_ack(_terminal[0], MAVLINK_M_ACK_REJECTED,
+				 "superseded; replacement storage failed");
+		}
+
+		send_ack(_active, MAVLINK_M_ACK_RECEIVED,
+			 navigation_stopped
+			 ? "movement uncommitted: navigation stopped; abort"
+			 : "movement uncommitted: stop unconfirmed; abort");
+		publish_status();
+		return;
+	}
+
+	if (!execution_applied) {
+		// Readiness is rechecked after the durable decision write. If the state
+		// changed during that write, a replacement command failed, or an old
+		// navigation task could not be stopped, undo the promotion and require a
+		// fresh operator decision. Never emit ACCEPTED for an unapplied takeover.
+		_active = active_before;
+		_inbox[0] = inbox_before[0];
+		_inbox[1] = inbox_before[1];
+
+		if (superseding) {
+			undo_remember_terminal(terminal_evicted);
+		}
+
+		restore_intercept_tracking(intercept_before);
+
+		if (!save_state()) {
+			PX4_ERR("MAVLink-M acceptance rollback was not persisted");
+			// Match RAM to the only known durable intermediate state. If this was a
+			// supersession, recreate its terminal-ring insertion after undoing the
+			// failed rollback and make a best effort to stop the old navigation.
+			_active = staged_active;
+			_inbox[0] = staged_inbox[0];
+			_inbox[1] = staged_inbox[1];
+
+			if (superseding) {
+				remember_terminal(superseded, AssignmentState::Aborted, MAVLINK_M_ACK_REJECTED);
+				clear_intercept_tracking();
+
+				if (active_before.command_flags != 0) {
+					if (!assignment_cancellation_ready(active_before)
+					    || !cancel_assignment_commands(active_before)) {
+						_deferred_navigation_stop = active_before;
+					}
+				}
+
+				send_ack(_terminal[0], MAVLINK_M_ACK_REJECTED,
+					 "superseded; replacement storage failed");
+			}
+
+			send_ack(_active, MAVLINK_M_ACK_RECEIVED,
+				 _deferred_navigation_stop.state != AssignmentState::Empty
+				 ? "movement uncommitted: old stop pending"
+				 : "storage failed: movement uncommitted; abort");
+
+		} else {
+			send_ack(decided, MAVLINK_M_ACK_RECEIVED,
+				 movement_requested
+				 ? "movement blocked: command failed; active retained"
+				 : "acceptance blocked: active navigation retained");
+		}
+
+		publish_status();
 		return;
 	}
 
 	Assignment acknowledged = _active;
 	acknowledged.last_ack_result = MAVLINK_M_ACK_ACCEPTED;
-	send_ack(acknowledged, MAVLINK_M_ACK_ACCEPTED, "local operator accepted active target");
-	(void)command_active_assignment();
+
+	if (superseding) {
+		send_ack(_terminal[0], MAVLINK_M_ACK_REJECTED, "superseded by accepted cue");
+		send_ack(acknowledged, MAVLINK_M_ACK_ACCEPTED, "accepted; previous cue superseded");
+
+	} else {
+		send_ack(acknowledged, MAVLINK_M_ACK_ACCEPTED, "local operator accepted active target");
+	}
 
 	publish_status();
 }
@@ -1170,6 +1654,14 @@ void MavlinkMHandler::reject_pending_or_abort_active(uint32_t message_id, uint32
 
 	if (pending != nullptr) {
 		Assignment decided = *pending;
+
+		if (!stop_deferred_navigation()) {
+			send_ack(decided, MAVLINK_M_ACK_RECEIVED,
+				 "rejection blocked: previous navigation stop pending");
+			publish_status();
+			return;
+		}
+
 		++decided.status_sequence;
 		const Assignment inbox_before[2] {_inbox[0], _inbox[1]};
 		const Assignment terminal_evicted = _terminal[TerminalCapacity - 1];
@@ -1180,7 +1672,8 @@ void MavlinkMHandler::reject_pending_or_abort_active(uint32_t message_id, uint32
 			_inbox[0] = inbox_before[0];
 			_inbox[1] = inbox_before[1];
 			undo_remember_terminal(terminal_evicted);
-			send_ack(decided, MAVLINK_M_ACK_FAILED, "decision storage failed");
+			send_ack(decided, MAVLINK_M_ACK_RECEIVED,
+				 "rejection blocked: decision storage failed; cue remains pending");
 			return;
 		}
 
@@ -1196,9 +1689,33 @@ void MavlinkMHandler::reject_pending_or_abort_active(uint32_t message_id, uint32
 	if (active_matches) {
 		Assignment decided = _active;
 		++decided.status_sequence;
+		const bool navigation_issued = (_active.command_flags & CommandNav) != 0;
+
+		if (!stop_deferred_navigation()) {
+			send_ack(_active, _active.last_ack_result,
+				 "abort blocked: previous navigation stop pending");
+			publish_status();
+			return;
+		}
+
+		// Never make an Aborted state durable while its issued navigation may still
+		// be running. Publish the current-position stop first. If it cannot be
+		// confirmed, retain the Active task and its command flags so the operator can
+		// retry and the UI cannot falsely report a completed abort.
+		if (navigation_issued
+		    && (!assignment_cancellation_ready(_active) || !cancel_assignment_commands(_active))) {
+			send_ack(_active, _active.last_ack_result,
+				 "abort blocked: navigation stop unconfirmed");
+			publish_status();
+			return;
+		}
+
 		const Assignment active_before = _active;
 		const Assignment inbox_before[2] {_inbox[0], _inbox[1]};
 		const Assignment terminal_evicted = _terminal[TerminalCapacity - 1];
+		const InterceptTracking intercept_before = intercept_tracking();
+		const bool aborting_intercept = intercept_assignment_matches(_active);
+
 		_active = Assignment{};
 		remember_terminal(decided, AssignmentState::Aborted, MAVLINK_M_ACK_REJECTED);
 
@@ -1207,12 +1724,19 @@ void MavlinkMHandler::reject_pending_or_abort_active(uint32_t message_id, uint32
 			_inbox[0] = inbox_before[0];
 			_inbox[1] = inbox_before[1];
 			undo_remember_terminal(terminal_evicted);
-			send_ack(decided, MAVLINK_M_ACK_FAILED, "abort storage failed");
+			restore_intercept_tracking(intercept_before);
+			send_ack(decided, active_before.last_ack_result,
+				 navigation_issued
+				 ? "abort unsaved: navigation stopped; task active"
+				 : "abort blocked: storage failed; task remains active");
 			return;
 		}
 
+		if (aborting_intercept) {
+			abort_intercept("task aborted");
+		}
+
 		send_ack(_terminal[0], MAVLINK_M_ACK_REJECTED, "local operator aborted active target");
-		(void)cancel_assignment_commands(_terminal[0]);
 
 		publish_status();
 
@@ -1250,7 +1774,7 @@ void MavlinkMHandler::update_local_decision()
 		_last_task_decision = decision.timestamp;
 
 		if (decision.action == mavlink_m_task_decision_s::ACTION_ACCEPT) {
-			accept_pending(decision.task_msgid, decision.task_instance);
+			accept_pending(decision.task_msgid, decision.task_instance, decision.requested_effect);
 
 		} else if (decision.action == mavlink_m_task_decision_s::ACTION_REJECT) {
 			reject_pending_or_abort_active(decision.task_msgid, decision.task_instance);
@@ -1322,6 +1846,51 @@ void MavlinkMHandler::update_rc()
 	_last_rc_position = position;
 }
 
+bool MavlinkMHandler::assignment_requests_movement(const Assignment &assignment) const
+{
+	return assignment.message_id == MAVLINK_MSG_ID_TARGET_CUE
+	       && assignment.cue_type == MAVLINK_M_CUE_TYPE_INVESTIGATE
+	       && (assignment.execution_effect == ActionRepositionCurrentAltitude
+		   || assignment.execution_effect == ActionInterceptCueAltitude);
+}
+
+bool MavlinkMHandler::movement_acceptance_ready(const Assignment &assignment, const char **reason)
+{
+	const bool guarded_intercept = assignment.execution_effect == ActionInterceptCueAltitude
+				       && PX4_ISFINITE(assignment.alt);
+
+	if (!source_recent(assignment.source_system)) {
+		*reason = "movement blocked: cue source is stale";
+		return false;
+	}
+
+	_vehicle_status_sub.update(&_vehicle_status);
+	_vehicle_land_detected_sub.update(&_vehicle_land_detected);
+	_global_position_sub.update(&_global_position);
+
+	if (!vehicle_ready_for_reposition() || !vehicle_airborne_for_reposition()) {
+		*reason = "movement blocked: vehicle must be armed, airborne, safe, and in Hold";
+		return false;
+	}
+
+	if (_global_position.timestamp == 0
+	    || hrt_elapsed_time(&_global_position.timestamp) >= 2'000'000
+	    || !PX4_ISFINITE(_global_position.lat)
+	    || !PX4_ISFINITE(_global_position.lon)
+	    || !PX4_ISFINITE(_global_position.alt)) {
+		*reason = "movement blocked: fresh aircraft AMSL position unavailable";
+		return false;
+	}
+
+	if (guarded_intercept
+	    && fabsf(assignment.alt - _global_position.alt) > _intercept_delta_z_m) {
+		*reason = "movement blocked: cue altitude exceeds MAV_M_INT_DZ";
+		return false;
+	}
+
+	return true;
+}
+
 bool MavlinkMHandler::vehicle_ready_for_reposition() const
 {
 	return _vehicle_status.timestamp != 0
@@ -1371,7 +1940,33 @@ bool MavlinkMHandler::publish_vehicle_command(const Assignment &assignment, uint
 	return _vehicle_command_pub.publish(vehicle_command);
 }
 
-bool MavlinkMHandler::command_active_assignment()
+bool MavlinkMHandler::publish_internal_fly_through(const Assignment &assignment, float altitude_m, uint32_t token)
+{
+	if (_mavlink == nullptr || !PX4_ISFINITE(altitude_m) || token == 0 || token > InterceptTokenMaximum) {
+		return false;
+	}
+
+	vehicle_command_s vehicle_command{};
+	vehicle_command.timestamp = hrt_absolute_time();
+	vehicle_command.command = vehicle_command_s::VEHICLE_CMD_PX4_MAVLINK_M_FLY_THROUGH;
+	// Binary32 represents every 16-bit integer exactly. Splitting the runtime
+	// token prevents a stale or unrelated local navigation event from proving
+	// completion of this accepted cue.
+	vehicle_command.param1 = static_cast<float>(token & UINT16_MAX);
+	vehicle_command.param2 = static_cast<float>((token >> 16) & UINT16_MAX);
+	vehicle_command.param5 = assignment.lat * 1e-7;
+	vehicle_command.param6 = assignment.lon * 1e-7;
+	vehicle_command.param7 = altitude_m;
+	vehicle_command.target_system = static_cast<uint8_t>(_mavlink->get_system_id());
+	vehicle_command.target_component = static_cast<uint8_t>(_mavlink->get_component_id());
+	vehicle_command.source_system = vehicle_command.target_system;
+	vehicle_command.source_component = vehicle_command.target_component;
+	vehicle_command.from_external = false;
+
+	return _vehicle_command_pub.publish(vehicle_command);
+}
+
+MavlinkMHandler::CommandApplicationResult MavlinkMHandler::command_active_assignment()
 {
 	// TARGET_CUE is explicitly non-kinetic. The only optional vehicle action is
 	// a one-shot reposition attempt for INVESTIGATE, called only by the explicit
@@ -1382,38 +1977,337 @@ bool MavlinkMHandler::command_active_assignment()
 	if (_active.state != AssignmentState::Active
 	    || _active.message_id != MAVLINK_MSG_ID_TARGET_CUE
 	    || _active.cue_type != MAVLINK_M_CUE_TYPE_INVESTIGATE
-	    || (_action_mode != ActionRepositionCurrentAltitude
-		&& _action_mode != ActionInterceptCueAltitude)
+	    || (_active.execution_effect != ActionRepositionCurrentAltitude
+		&& _active.execution_effect != ActionInterceptCueAltitude)
+	    || _active.execution_effect > sanitize_action(_action_mode)
 	    || (_active.command_flags & CommandNav) != 0) {
-		return false;
+		return CommandApplicationResult::FailedBeforePublication;
 	}
 
+	clear_intercept_tracking();
+	const bool guarded_intercept = _active.execution_effect == ActionInterceptCueAltitude
+				       && PX4_ISFINITE(_active.alt);
 	const char *freshness_reason = nullptr;
 	uint8_t freshness_result = MAVLINK_M_ACK_FAILED;
 
-	// Durable acceptance can include an fsync/rename. Recheck immediately
-	// before publication so a cue crossing its deadline during that commit can
-	// be accepted for the audit trail but can never cause late motion.
+	// The durable decision write can include an fsync/rename. Recheck immediately
+	// before publication so a cue crossing its deadline during that commit is
+	// rolled back to Pending and can never receive a false ACCEPTED ACK.
 	if (!validate_common(_active, &freshness_reason, &freshness_result)) {
 		PX4_WARN("MAVLink-M reposition suppressed: %s",
 			 freshness_reason != nullptr ? freshness_reason : "cue no longer valid");
-		return false;
+
+		if (guarded_intercept) {
+			abort_intercept(freshness_reason != nullptr ? freshness_reason : "cue no longer valid");
+		}
+
+		return CommandApplicationResult::FailedBeforePublication;
 	}
 
 	// Acceptance persistence can also span a vehicle-state transition. Pull the
 	// newest sample after the commit and immediately before the flight-state
 	// gate rather than relying on update()'s pre-decision cache.
-	_vehicle_status_sub.update(&_vehicle_status);
-	_vehicle_land_detected_sub.update(&_vehicle_land_detected);
-	_global_position_sub.update(&_global_position);
+	const char *movement_reason = nullptr;
 
-	if (!vehicle_ready_for_reposition() || !vehicle_airborne_for_reposition()) {
+	if (!movement_acceptance_ready(_active, &movement_reason)) {
 		if (_last_reposition_block_log == 0
 		    || hrt_elapsed_time(&_last_reposition_block_log) > 2'000'000) {
-			PX4_INFO("MAVLink-M reposition not issued; accept a fresh cue while already airborne, armed, and in Hold");
+			PX4_WARN("MAVLink-M reposition not issued: %s",
+				 movement_reason != nullptr ? movement_reason : "navigation unavailable");
 			_last_reposition_block_log = hrt_absolute_time();
 		}
 
+		if (guarded_intercept) {
+			abort_intercept(movement_reason != nullptr ? movement_reason : "vehicle not safe for intercept");
+		}
+
+		return CommandApplicationResult::FailedBeforePublication;
+	}
+
+	const double target_lat = _active.lat * 1e-7;
+	const double target_lon = _active.lon * 1e-7;
+	// Level travel keeps the acceptance-time AMSL altitude. Guarded intercept
+	// carries the exact cue altitude so Navigator can build a performance-bound
+	// approach before crossing the target coordinate.
+	const float acceptance_alt = _global_position.alt;
+	const float target_alt = guarded_intercept ? _active.alt : acceptance_alt;
+
+	uint32_t intercept_token = 0;
+
+	if (guarded_intercept) {
+		if (_intercept_token_counter == 0) {
+			_intercept_token_counter = static_cast<uint32_t>(hrt_absolute_time()) & InterceptTokenMaximum;
+		}
+
+		_intercept_token_counter = (_intercept_token_counter % InterceptTokenMaximum) + 1;
+		intercept_token = _intercept_token_counter;
+	}
+
+	const bool command_published = guarded_intercept
+				       ? publish_internal_fly_through(_active, target_alt, intercept_token)
+				       : publish_vehicle_command(_active, vehicle_command_s::VEHICLE_CMD_DO_REPOSITION,
+					       NAN, RepositionChangeModeFlag, NAN, NAN,
+					       target_lat, target_lon, target_alt);
+
+	if (command_published) {
+		_active.command_flags |= CommandNav;
+		_active.last_ack_result = MAVLINK_M_ACK_ACCEPTED;
+
+		if (guarded_intercept) {
+			_active.command_flags |= CommandInterceptAltitude;
+			begin_intercept_tracking(acceptance_alt, target_alt, intercept_token);
+		}
+
+		// Publishing the replacement command releases the predecessor. Clear its
+		// durable stop marker in the same commit as the new command flags. If that
+		// commit fails, restore the marker before stopping the uncommitted command.
+		Assignment *stop_marker = find_navigation_stop_marker();
+		const uint8_t stop_marker_flags = stop_marker != nullptr ? stop_marker->command_flags : 0;
+
+		if (stop_marker != nullptr) {
+			stop_marker->command_flags &= static_cast<uint8_t>(~CommandStopPending);
+		}
+
+		if (!save_state()) {
+			if (stop_marker != nullptr) {
+				stop_marker->command_flags = stop_marker_flags;
+			}
+
+			PX4_ERR("MAVLink-M command state was not persisted; stopping navigation");
+			const bool navigation_stopped = cancel_assignment_commands(_active);
+
+			if (navigation_stopped) {
+				clear_intercept_tracking();
+			}
+
+			return navigation_stopped
+			       ? CommandApplicationResult::PersistenceFailedAfterPublicationStopped
+			       : CommandApplicationResult::PersistenceFailedAfterPublicationStopUnconfirmed;
+		}
+
+		publish_status();
+		return CommandApplicationResult::Applied;
+	}
+
+	return CommandApplicationResult::FailedBeforePublication;
+}
+
+void MavlinkMHandler::clear_intercept_tracking()
+{
+	_intercept_phase = InterceptPhase::None;
+	_intercept_message_id = 0;
+	_intercept_instance_id = 0;
+	_intercept_source_system = 0;
+	_intercept_source_component = 0;
+	_intercept_acceptance_altitude_m = NAN;
+	_intercept_expected_altitude_m = NAN;
+	_intercept_command_time = 0;
+	_intercept_completion_ack_time = 0;
+	_intercept_completion_wait_started = 0;
+	_intercept_dwell_started = 0;
+	_intercept_token = 0;
+	_intercept_setpoint_seen = false;
+	_intercept_navigator_started = false;
+	_intercept_navigator_completed = false;
+	_intercept_navigator_missed = false;
+	_intercept_navigator_failed = false;
+}
+
+MavlinkMHandler::InterceptTracking MavlinkMHandler::intercept_tracking() const
+{
+	InterceptTracking tracking{};
+	tracking.phase = _intercept_phase;
+	tracking.command_time = _intercept_command_time;
+	tracking.completion_ack_time = _intercept_completion_ack_time;
+	tracking.completion_wait_started = _intercept_completion_wait_started;
+	tracking.dwell_started = _intercept_dwell_started;
+	tracking.message_id = _intercept_message_id;
+	tracking.instance_id = _intercept_instance_id;
+	tracking.token = _intercept_token;
+	tracking.source_system = _intercept_source_system;
+	tracking.source_component = _intercept_source_component;
+	tracking.acceptance_altitude_m = _intercept_acceptance_altitude_m;
+	tracking.expected_altitude_m = _intercept_expected_altitude_m;
+	tracking.setpoint_seen = _intercept_setpoint_seen;
+	tracking.navigator_started = _intercept_navigator_started;
+	tracking.navigator_completed = _intercept_navigator_completed;
+	tracking.navigator_missed = _intercept_navigator_missed;
+	tracking.navigator_failed = _intercept_navigator_failed;
+	return tracking;
+}
+
+void MavlinkMHandler::restore_intercept_tracking(const InterceptTracking &tracking)
+{
+	_intercept_phase = tracking.phase;
+	_intercept_command_time = tracking.command_time;
+	_intercept_completion_ack_time = tracking.completion_ack_time;
+	_intercept_completion_wait_started = tracking.completion_wait_started;
+	_intercept_dwell_started = tracking.dwell_started;
+	_intercept_message_id = tracking.message_id;
+	_intercept_instance_id = tracking.instance_id;
+	_intercept_token = tracking.token;
+	_intercept_source_system = tracking.source_system;
+	_intercept_source_component = tracking.source_component;
+	_intercept_acceptance_altitude_m = tracking.acceptance_altitude_m;
+	_intercept_expected_altitude_m = tracking.expected_altitude_m;
+	_intercept_setpoint_seen = tracking.setpoint_seen;
+	_intercept_navigator_started = tracking.navigator_started;
+	_intercept_navigator_completed = tracking.navigator_completed;
+	_intercept_navigator_missed = tracking.navigator_missed;
+	_intercept_navigator_failed = tracking.navigator_failed;
+}
+
+void MavlinkMHandler::begin_intercept_tracking(float acceptance_altitude_m, float target_altitude_m, uint32_t token)
+{
+	clear_intercept_tracking();
+	_intercept_message_id = _active.message_id;
+	_intercept_instance_id = _active.instance_id;
+	_intercept_source_system = _active.source_system;
+	_intercept_source_component = _active.source_component;
+	_intercept_acceptance_altitude_m = acceptance_altitude_m;
+	_intercept_expected_altitude_m = target_altitude_m;
+	_intercept_token = token;
+	_intercept_command_time = hrt_absolute_time();
+	_intercept_phase = InterceptPhase::Transit;
+}
+
+bool MavlinkMHandler::intercept_assignment_matches(const Assignment &assignment) const
+{
+	return assignment.state != AssignmentState::Empty
+	       && assignment.message_id == _intercept_message_id
+	       && assignment.instance_id == _intercept_instance_id
+	       && assignment.source_system == _intercept_source_system
+	       && assignment.source_component == _intercept_source_component;
+}
+
+void MavlinkMHandler::abort_intercept(const char *reason, bool stop_navigation)
+{
+	if (_intercept_phase == InterceptPhase::Aborted) {
+		return;
+	}
+
+	// A safety-gate loss must stop every phase of the owned intercept, including
+	// its initial POSITION fly-through and target-centered dwell. Explicit task
+	// abort and expiry leave this false because their durable decision paths
+	// cancel the assignment exactly once after saving the terminal state.
+	const bool navigation_active = stop_navigation
+				       && _intercept_phase != InterceptPhase::None
+				       && _active.state == AssignmentState::Active
+				       && intercept_assignment_matches(_active);
+
+	if (_intercept_phase == InterceptPhase::None
+	    && _active.state == AssignmentState::Active
+	    && _active.message_id == MAVLINK_MSG_ID_TARGET_CUE
+	    && _active.cue_type == MAVLINK_M_CUE_TYPE_INVESTIGATE
+	    && _active.execution_effect == ActionInterceptCueAltitude
+	    && PX4_ISFINITE(_active.alt)) {
+		_intercept_message_id = _active.message_id;
+		_intercept_instance_id = _active.instance_id;
+		_intercept_source_system = _active.source_system;
+		_intercept_source_component = _active.source_component;
+	}
+
+	if (_intercept_message_id == 0 || _intercept_instance_id == 0) {
+		return;
+	}
+
+	_intercept_phase = InterceptPhase::Aborted;
+	_intercept_dwell_started = 0;
+	_intercept_setpoint_seen = false;
+	PX4_WARN("MAVLink-M intercept aborted: %s", reason != nullptr ? reason : "safety gate");
+
+	if (navigation_active) {
+		(void)cancel_assignment_commands(_active);
+	}
+
+	publish_status();
+}
+
+bool MavlinkMHandler::intercept_transit_setpoint_matches(float expected_altitude_m) const
+{
+	const position_setpoint_s &setpoint = _position_setpoint_triplet.current;
+	const position_setpoint_s &next = _position_setpoint_triplet.next;
+
+	if (!setpoint.valid || setpoint.type != position_setpoint_s::SETPOINT_TYPE_POSITION
+	    || !next.valid
+	    || !PX4_ISFINITE(setpoint.lat) || !PX4_ISFINITE(setpoint.lon)
+	    || !PX4_ISFINITE(setpoint.alt) || !PX4_ISFINITE(next.lat) || !PX4_ISFINITE(next.lon)
+	    || !PX4_ISFINITE(next.alt) || !PX4_ISFINITE(expected_altitude_m)) {
+		return false;
+	}
+
+	const double target_lat = _active.lat * 1e-7;
+	const double target_lon = _active.lon * 1e-7;
+	const float setpoint_offset_m = get_distance_to_next_waypoint(
+					 setpoint.lat, setpoint.lon, target_lat, target_lon);
+	const float next_offset_m = get_distance_to_next_waypoint(
+				      next.lat, next.lon, target_lat, target_lon);
+	const bool target_leg = next.type == position_setpoint_s::SETPOINT_TYPE_LOITER
+				&& setpoint.mavlink_m_exact_altitude
+				&& PX4_ISFINITE(setpoint_offset_m)
+				&& setpoint_offset_m <= SetpointHorizontalToleranceM
+				&& PX4_ISFINITE(next_offset_m)
+				&& next_offset_m <= SetpointHorizontalToleranceM
+				&& fabsf(setpoint.alt - expected_altitude_m) <= SetpointAltitudeToleranceM
+				&& fabsf(next.alt - expected_altitude_m) <= SetpointAltitudeToleranceM;
+	const bool approach_leg = next.type == position_setpoint_s::SETPOINT_TYPE_POSITION
+				  && next.mavlink_m_exact_altitude
+				  && PX4_ISFINITE(next_offset_m)
+				  && next_offset_m <= SetpointHorizontalToleranceM
+				  && fabsf(next.alt - expected_altitude_m) <= SetpointAltitudeToleranceM
+				  && PX4_ISFINITE(_intercept_acceptance_altitude_m)
+				  && fabsf(setpoint.alt - _intercept_acceptance_altitude_m) <= SetpointAltitudeToleranceM;
+	return target_leg || approach_leg;
+}
+
+bool MavlinkMHandler::intercept_loiter_setpoint_matches(float expected_altitude_m) const
+{
+	const position_setpoint_s &setpoint = _position_setpoint_triplet.current;
+
+	if (!setpoint.valid || setpoint.type != position_setpoint_s::SETPOINT_TYPE_LOITER
+	    || !PX4_ISFINITE(setpoint.lat) || !PX4_ISFINITE(setpoint.lon)
+	    || !PX4_ISFINITE(setpoint.alt) || !PX4_ISFINITE(expected_altitude_m)) {
+		return false;
+	}
+
+	const double target_lat = _active.lat * 1e-7;
+	const double target_lon = _active.lon * 1e-7;
+	const float setpoint_offset_m = get_distance_to_next_waypoint(
+					 setpoint.lat, setpoint.lon, target_lat, target_lon);
+	return PX4_ISFINITE(setpoint_offset_m)
+	       && setpoint_offset_m <= SetpointHorizontalToleranceM
+	       && fabsf(setpoint.alt - expected_altitude_m) <= SetpointAltitudeToleranceM;
+}
+
+bool MavlinkMHandler::intercept_safety_gates_valid(const char **reason) const
+{
+	if (!intercept_assignment_matches(_active)
+	    || _active.state != AssignmentState::Active
+	    || _active.message_id != MAVLINK_MSG_ID_TARGET_CUE
+	    || _active.cue_type != MAVLINK_M_CUE_TYPE_INVESTIGATE
+	    || _active.execution_effect != ActionInterceptCueAltitude
+	    || _active.execution_effect > sanitize_action(_action_mode)
+	    || !PX4_ISFINITE(_active.alt)
+	    || (_active.command_flags & CommandNav) == 0) {
+		*reason = "active cue or action changed";
+		return false;
+	}
+
+	const char *assignment_reason = nullptr;
+	uint8_t assignment_result = MAVLINK_M_ACK_FAILED;
+
+	if (!validate_common(_active, &assignment_reason, &assignment_result)) {
+		*reason = assignment_reason != nullptr ? assignment_reason : "cue invalid";
+		return false;
+	}
+
+	if (!source_recent(_active.source_system)) {
+		*reason = "cue source stale";
+		return false;
+	}
+
+	if (!vehicle_ready_for_reposition() || !vehicle_airborne_for_reposition()) {
+		*reason = "vehicle left armed airborne Hold";
 		return false;
 	}
 
@@ -1422,36 +2316,232 @@ bool MavlinkMHandler::command_active_assignment()
 	    || !PX4_ISFINITE(_global_position.lat)
 	    || !PX4_ISFINITE(_global_position.lon)
 	    || !PX4_ISFINITE(_global_position.alt)) {
-		PX4_WARN("MAVLink-M reposition not issued; fresh aircraft AMSL position unavailable");
+		*reason = "aircraft position stale";
 		return false;
+	}
+
+	if (!PX4_ISFINITE(_intercept_acceptance_altitude_m)
+	    || fabsf(_active.alt - _intercept_acceptance_altitude_m) > _intercept_delta_z_m) {
+		*reason = "cue altitude exceeds MAV_M_INT_DZ";
+		return false;
+	}
+
+	return true;
+}
+
+float MavlinkMHandler::intercept_arrival_radius() const
+{
+	const bool fixed_wing = _vehicle_status.vehicle_type == vehicle_status_s::VEHICLE_TYPE_FIXED_WING;
+	return effective_intercept_radius(_intercept_radius_m, fixed_wing, _nav_loiter_radius_m);
+}
+
+void MavlinkMHandler::update_intercept_command_ack()
+{
+	for (unsigned i = 0; i < vehicle_command_ack_s::ORB_QUEUE_LENGTH; ++i) {
+		vehicle_command_ack_s ack{};
+
+		if (!_vehicle_command_ack_sub.update(&ack)) {
+			return;
+		}
+
+		if (_intercept_phase == InterceptPhase::None
+		    || _intercept_phase == InterceptPhase::Aborted
+		    || ack.command != vehicle_command_s::VEHICLE_CMD_PX4_MAVLINK_M_FLY_THROUGH
+		    || ack.from_external || ack.result_param2 <= 0
+		    || static_cast<uint32_t>(ack.result_param2) != _intercept_token
+		    || _mavlink == nullptr
+		    || ack.target_system != static_cast<uint8_t>(_mavlink->get_system_id())
+		    || ack.target_component != static_cast<uint8_t>(_mavlink->get_component_id())) {
+			continue;
+		}
+
+		switch (ack.result) {
+		case vehicle_command_ack_s::VEHICLE_CMD_RESULT_IN_PROGRESS:
+			_intercept_navigator_started = true;
+			break;
+
+		case vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED:
+			_intercept_navigator_started = true;
+			_intercept_navigator_completed = true;
+			_intercept_completion_ack_time = hrt_absolute_time();
+			break;
+
+		case vehicle_command_ack_s::VEHICLE_CMD_RESULT_FAILED:
+			if (ack.result_param1 == 1) {
+				_intercept_navigator_missed = true;
+
+			} else {
+				_intercept_navigator_failed = true;
+			}
+
+			break;
+
+		case vehicle_command_ack_s::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED:
+		case vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED:
+		case vehicle_command_ack_s::VEHICLE_CMD_RESULT_CANCELLED:
+			_intercept_navigator_failed = true;
+			break;
+
+		default:
+			break;
+		}
+	}
+}
+
+void MavlinkMHandler::update_intercept()
+{
+	if (_intercept_phase == InterceptPhase::None
+	    || _intercept_phase == InterceptPhase::Aborted) {
+		return;
+	}
+
+	const char *safety_reason = nullptr;
+
+	if (!intercept_safety_gates_valid(&safety_reason)) {
+		abort_intercept(safety_reason, true);
+		return;
+	}
+
+	const hrt_abstime now = hrt_absolute_time();
+	const bool transit_setpoint_owned = intercept_transit_setpoint_matches(_intercept_expected_altitude_m);
+	const bool target_loiter_owned = intercept_loiter_setpoint_matches(_intercept_expected_altitude_m);
+
+	if (_intercept_navigator_missed) {
+		// Navigator evaluated the one and only target-plane crossing outside the
+		// tight hit bounds, then deliberately established target-centered loiter.
+		// Latch failure without replacing that safe loiter.
+		abort_intercept("exact target missed; target-centered loiter retained");
+		return;
+	}
+
+	if (_intercept_navigator_failed) {
+		abort_intercept("Navigator rejected, cancelled, or missed the exact target", true);
+		return;
+	}
+
+	if (_intercept_phase == InterceptPhase::Transit) {
+		if (transit_setpoint_owned) {
+			// Seeing the private token-bound approach or target triplet binds this
+			// state machine to Navigator's exact fly-through path. Merely entering
+			// the future loiter radius can never satisfy this gate.
+			_intercept_setpoint_seen = true;
+
+			if (_intercept_navigator_completed && _intercept_completion_ack_time != 0
+			    && now - _intercept_completion_ack_time >= CompletionAckTimeout) {
+				abort_intercept("Navigator completion did not promote the target loiter", true);
+			}
+
+			return;
+		}
+
+		if (target_loiter_owned && _intercept_setpoint_seen) {
+			if (_intercept_navigator_completed) {
+				// The target loiter transition is accepted only with Navigator's
+				// token-matched completion ACK. An ordinary reposition to the same
+				// coordinate cannot prove that the target plane was crossed.
+				_intercept_phase = InterceptPhase::Dwell;
+				_intercept_completion_wait_started = 0;
+				_intercept_dwell_started = 0;
+				publish_status();
+
+			} else {
+				if (_intercept_completion_wait_started == 0) {
+					_intercept_completion_wait_started = now;
+				}
+
+				if (now - _intercept_completion_wait_started >= CompletionAckTimeout) {
+					abort_intercept("target loiter has no matching completion ACK", true);
+				}
+
+				return;
+			}
+
+		} else if (_intercept_setpoint_seen
+			   || _intercept_command_time == 0
+			   || now - _intercept_command_time >= SetpointApplyTimeout) {
+			abort_intercept("navigation setpoint overridden");
+			return;
+
+		} else {
+			return;
+		}
+	}
+
+	if (_intercept_phase == InterceptPhase::Complete) {
+		if (target_loiter_owned) {
+			_intercept_setpoint_seen = true;
+			return;
+		}
+
+		if (_intercept_setpoint_seen || _intercept_command_time == 0
+		    || now - _intercept_command_time >= SetpointApplyTimeout) {
+			abort_intercept("navigation setpoint overridden", true);
+		}
+
+		return;
+	}
+
+	if (_intercept_phase != InterceptPhase::Dwell || !target_loiter_owned
+	    || !_intercept_setpoint_seen) {
+		abort_intercept("fly-through completion was not retained");
+		return;
 	}
 
 	const double target_lat = _active.lat * 1e-7;
 	const double target_lon = _active.lon * 1e-7;
-	// Normal point-to-point navigation creates a target-position setpoint at
-	// the aircraft's acceptance-time AMSL altitude. This is the explicit
-	// "invisible waypoint" that prevents a ground-target altitude from causing
-	// an unintended climb or descent.
-	float target_alt = _global_position.alt;
+	const float distance_m = get_distance_to_next_waypoint(
+					 _global_position.lat, _global_position.lon, target_lat, target_lon);
+	const float arrival_radius_m = intercept_arrival_radius();
+	const bool inside_radius = PX4_ISFINITE(distance_m) && distance_m <= arrival_radius_m;
 
-	if (_action_mode == ActionInterceptCueAltitude && PX4_ISFINITE(_active.alt)) {
-		target_alt = _active.alt;
-	}
-
-	if (publish_vehicle_command(_active, vehicle_command_s::VEHICLE_CMD_DO_REPOSITION,
-				    NAN, RepositionChangeModeFlag, NAN, NAN,
-				    target_lat, target_lon, target_alt)) {
-		_active.command_flags |= CommandNav;
-
-		if (!save_state()) {
-			PX4_WARN("MAVLink-M command state was not persisted");
+	if (!inside_radius) {
+		if (_intercept_dwell_started != 0) {
+			_intercept_dwell_started = 0;
+			publish_status();
 		}
 
-		publish_status();
-		return true;
+		return;
 	}
 
-	return false;
+	if (_intercept_dwell_started == 0) {
+		_intercept_dwell_started = now;
+		publish_status();
+	}
+
+	const hrt_abstime required_dwell = static_cast<hrt_abstime>(_intercept_dwell_s * 1'000'000.f);
+	const bool dwell_complete = _intercept_dwell_started != 0
+				    && now - _intercept_dwell_started >= required_dwell;
+
+	if (!dwell_complete) {
+		return;
+	}
+
+	// Re-evaluate every gate immediately before latching completion. The cue
+	// altitude was already part of the guarded exact approach, so no second
+	// reposition command is emitted here.
+	safety_reason = nullptr;
+	const bool task_and_vehicle_safe = intercept_safety_gates_valid(&safety_reason);
+	const bool setpoint_still_owned = intercept_loiter_setpoint_matches(_intercept_expected_altitude_m);
+	const bool fly_through_complete = _intercept_phase == InterceptPhase::Dwell
+					  && _intercept_setpoint_seen;
+	const bool altitude_within_limit = PX4_ISFINITE(_intercept_acceptance_altitude_m)
+					   && fabsf(_active.alt - _intercept_acceptance_altitude_m) <= _intercept_delta_z_m;
+
+	if (!intercept_completion_allowed(task_and_vehicle_safe, true, true,
+					setpoint_still_owned, fly_through_complete && inside_radius, dwell_complete,
+					altitude_within_limit)) {
+		abort_intercept(safety_reason != nullptr ? safety_reason : "completion gate changed");
+		return;
+	}
+
+	_intercept_phase = InterceptPhase::Complete;
+	_intercept_dwell_started = 0;
+
+	if (!save_state()) {
+		PX4_WARN("MAVLink-M intercept completion was not persisted");
+	}
+
+	publish_status();
 }
 
 bool MavlinkMHandler::cancel_assignment_commands(const Assignment &assignment)
@@ -1462,21 +2552,99 @@ bool MavlinkMHandler::cancel_assignment_commands(const Assignment &assignment)
 
 	// Revoking future action authority must not revoke the ability to stop a
 	// reposition that this endpoint already issued and durably marked.
+	if (!assignment_cancellation_ready(assignment)) {
+		return false;
+	}
+
+	return publish_vehicle_command(assignment, vehicle_command_s::VEHICLE_CMD_DO_REPOSITION,
+				       NAN, RepositionChangeModeFlag, NAN, NAN,
+				       _global_position.lat, _global_position.lon,
+				       _global_position.alt);
+}
+
+bool MavlinkMHandler::assignment_cancellation_ready(const Assignment &assignment)
+{
+	if (assignment.command_flags == 0) {
+		return true;
+	}
+
 	_vehicle_status_sub.update(&_vehicle_status);
 	_global_position_sub.update(&_global_position);
 
-	if ((assignment.command_flags & CommandNav) != 0
-	    && vehicle_ready_for_reposition()
-	    && _global_position.timestamp != 0 && hrt_elapsed_time(&_global_position.timestamp) < 2'000'000
-	    && PX4_ISFINITE(_global_position.lat) && PX4_ISFINITE(_global_position.lon)
-	    && PX4_ISFINITE(_global_position.alt)) {
-		return publish_vehicle_command(assignment, vehicle_command_s::VEHICLE_CMD_DO_REPOSITION,
-					       NAN, RepositionChangeModeFlag, NAN, NAN,
-					       _global_position.lat, _global_position.lon,
-					       _global_position.alt);
+	return (assignment.command_flags & CommandNav) != 0
+	       && vehicle_ready_for_reposition()
+	       && _global_position.timestamp != 0 && hrt_elapsed_time(&_global_position.timestamp) < 2'000'000
+	       && PX4_ISFINITE(_global_position.lat) && PX4_ISFINITE(_global_position.lon)
+	       && PX4_ISFINITE(_global_position.alt);
+}
+
+MavlinkMHandler::Assignment *MavlinkMHandler::find_navigation_stop_marker()
+{
+	for (Assignment &assignment : _terminal) {
+		if ((assignment.state == AssignmentState::Aborted
+		     || assignment.state == AssignmentState::Expired)
+		    && (assignment.command_flags & CommandNav) != 0
+		    && (assignment.command_flags & CommandStopPending) != 0) {
+			return &assignment;
+		}
 	}
 
-	return false;
+	return nullptr;
+}
+
+bool MavlinkMHandler::stop_deferred_navigation()
+{
+	Assignment *marker = find_navigation_stop_marker();
+
+	if (_deferred_navigation_stop.state == AssignmentState::Empty && marker != nullptr) {
+		_deferred_navigation_stop = *marker;
+	}
+
+	if (_deferred_navigation_stop.state == AssignmentState::Empty
+	    || (_deferred_navigation_stop.command_flags & CommandNav) == 0) {
+		_deferred_navigation_stop = Assignment{};
+		return marker == nullptr;
+	}
+
+	if (!assignment_cancellation_ready(_deferred_navigation_stop)
+	    || !cancel_assignment_commands(_deferred_navigation_stop)) {
+		return false;
+	}
+
+	// The hold is published, but the obligation is not complete until clearing
+	// its marker is durable. If storage fails, retain the marker and retry. A
+	// repeated hold is safe; forgetting the obligation across a restart is not.
+	marker = find_navigation_stop_marker();
+	const bool stopped_uncommitted_active = _active.state == AssignmentState::Active
+			&& _active.last_ack_result == MAVLINK_M_ACK_RECEIVED
+			&& (_active.command_flags & CommandNav) != 0;
+
+	if (stopped_uncommitted_active) {
+		// The failed final commit left these execution flags only in RAM. The
+		// durable stage already has RECEIVED with no command. The hold just stopped
+		// that uncommitted navigation, so never persist or display the stale flags.
+		_active.command_flags &= static_cast<uint8_t>(~CommandExecutionAll);
+		clear_intercept_tracking();
+	}
+
+	if (marker != nullptr) {
+		const uint8_t command_flags_before = marker->command_flags;
+		marker->command_flags &= static_cast<uint8_t>(~CommandStopPending);
+
+		if (!save_state()) {
+			marker->command_flags = command_flags_before;
+			PX4_WARN("deferred MAVLink-M navigation stopped but marker storage failed");
+			return false;
+		}
+
+	} else if (stopped_uncommitted_active && !save_state()) {
+		PX4_WARN("uncommitted MAVLink-M navigation stopped but state storage failed");
+		return false;
+	}
+
+	PX4_WARN("stopped and cleared deferred MAVLink-M navigation");
+	_deferred_navigation_stop = Assignment{};
+	return true;
 }
 
 bool MavlinkMHandler::assignment_expired_at(const Assignment &assignment, uint64_t now_usec) const
@@ -1506,11 +2674,21 @@ void MavlinkMHandler::expire_assignments(uint64_t now_usec)
 	unsigned expired_count = 0;
 	const Assignment active_before = _active;
 	const Assignment inbox_before[2] {_inbox[0], _inbox[1]};
+	const InterceptTracking intercept_before = intercept_tracking();
+	bool active_intercept_expired = false;
 
 	if (_active.state == AssignmentState::Active
 	    && assignment_expired_at(_active, now_usec)) {
 		Assignment expired = _active;
+
+		if ((expired.command_flags & CommandNav) != 0) {
+			expired.command_flags |= CommandStopPending;
+		}
+
 		++expired.status_sequence;
+
+		active_intercept_expired = intercept_assignment_matches(_active);
+
 		_active = Assignment{};
 		terminal_evicted[expired_count] = _terminal[TerminalCapacity - 1];
 		remember_terminal(expired, AssignmentState::Expired, MAVLINK_M_ACK_EXPIRED);
@@ -1544,10 +2722,20 @@ void MavlinkMHandler::expire_assignments(uint64_t now_usec)
 				undo_remember_terminal(terminal_evicted[i - 1]);
 			}
 
+			restore_intercept_tracking(intercept_before);
+
 		} else {
+			if (active_intercept_expired) {
+				abort_intercept("task expired");
+			}
+
 			for (unsigned i = 0; i < expired_count; ++i) {
 				send_ack(expired_assignments[i], MAVLINK_M_ACK_EXPIRED, "assignment expired");
-				(void)cancel_assignment_commands(expired_assignments[i]);
+			}
+
+			if (Assignment *stop_marker = find_navigation_stop_marker()) {
+				_deferred_navigation_stop = *stop_marker;
+				(void)stop_deferred_navigation();
 			}
 		}
 
@@ -1650,6 +2838,7 @@ void MavlinkMHandler::send_control_status()
 		const int32_t configuration = (static_cast<int32_t>(_control_status.action_mode) << 8)
 					      | static_cast<int32_t>(_control_status.cue_type);
 		send_int("AAGS_CFG", configuration);
+		send_int("AAGS_IPHS", static_cast<int32_t>(_control_status.intercept_phase));
 		send_int(pending ? "AAGS_PEND" : "AAGS_ACTV", cue_bits);
 
 	} else if (terminal) {
@@ -1737,7 +2926,7 @@ void MavlinkMHandler::publish_status()
 	status.relative_bearing_deg = NAN;
 	status.range_m = NAN;
 	status.alt_msl_m = NAN;
-	status.source_fresh = _source_last_seen != 0 && hrt_elapsed_time(&_source_last_seen) < SourceFreshTimeout;
+	status.intercept_phase = mavlink_m_target_status_s::INTERCEPT_PHASE_NONE;
 
 	for (const Assignment &assignment : _inbox) {
 		if (assignment.state != AssignmentState::Empty) {
@@ -1746,6 +2935,7 @@ void MavlinkMHandler::publish_status()
 	}
 
 	if (display != nullptr) {
+		status.source_fresh = source_recent(display->source_system);
 		status.assignment_time_usec = display->time_usec;
 		status.track_identity_time_usec = display->track_identity_time_usec;
 		status.message_id = display->message_id;
@@ -1757,8 +2947,14 @@ void MavlinkMHandler::publish_status()
 		status.target_class = display->target_class;
 		status.target_force = display->target_force;
 		status.cue_type = display->cue_type;
-		status.action_mode = static_cast<uint8_t>(_action_mode);
+		status.action_mode = display->state == AssignmentState::Pending
+				     ? sanitize_action(_action_mode) : display->execution_effect;
 		status.command_flags = display->command_flags;
+
+		if (intercept_assignment_matches(*display)) {
+			status.intercept_phase = static_cast<uint8_t>(_intercept_phase);
+		}
+
 		status.prompt = display->state == AssignmentState::Pending;
 		status.restored = display->restored != 0;
 		status.lat = display->lat;
@@ -1806,6 +3002,11 @@ void MavlinkMHandler::update()
 	_attitude_sub.update(&_attitude);
 	_vehicle_land_detected_sub.update(&_vehicle_land_detected);
 	_vehicle_status_sub.update(&_vehicle_status);
+	_position_setpoint_triplet_sub.update(&_position_setpoint_triplet);
+
+	if (_deferred_navigation_stop.state != AssignmentState::Empty) {
+		(void)stop_deferred_navigation();
+	}
 
 	const bool cue_receiver_enabled = enabled();
 	const bool owner_control_enabled = control_enabled();
@@ -1825,10 +3026,19 @@ void MavlinkMHandler::update()
 			_state_loaded = true;
 		}
 
+		// Do not let expiry, RC decisions, or another acceptance mutate the
+		// terminal ring while its persisted predecessor-stop marker is unresolved.
+		if (!stop_deferred_navigation()) {
+			publish_status();
+			return;
+		}
+
 		const uint64_t now_usec = utc_now_usec();
 		expire_assignments(now_usec);
 		update_rc();
 		update_local_decision();
+		update_intercept_command_ack();
+		update_intercept();
 
 		if (now - _last_osd_send >= 200'000) {
 			send_osd_vector();
@@ -2030,17 +3240,75 @@ bool MavlinkMHandler::load_state()
 	::close(fd);
 
 	if (bytes != static_cast<ssize_t>(sizeof(state)) || state.magic != PersistenceMagic
-	    || state.version != PersistenceVersion || state.size != sizeof(state)
+	    || (state.version != PersistenceVersion && state.version != PreviousPersistenceVersion)
+	    || state.size != sizeof(state)
 	    || state.crc != state_crc(state)) {
 		PX4_WARN("ignoring invalid MAVLink-M persisted state");
 		return false;
 	}
 
 	if (state.mavlink_instance != static_cast<uint8_t>(_instance)
-	    || state.source_system != static_cast<uint8_t>(_source_system)
+	    || state.source_system != persisted_system_selector(_source_system)
 	    || state.source_component != static_cast<uint8_t>(_source_component)
 	    || strncmp(state.profile_hash, AAGS_MAVLINK_M_CORE_XML_SHA256, sizeof(state.profile_hash)) != 0) {
 		PX4_WARN("ignoring MAVLink-M state for different endpoint/profile");
+		Assignment stale_navigation{};
+
+		for (const Assignment &assignment : state.terminal) {
+			if ((assignment.command_flags & CommandNav) != 0
+			    && (assignment.command_flags & CommandStopPending) != 0) {
+				stale_navigation = assignment;
+				break;
+			}
+		}
+
+		if (stale_navigation.state == AssignmentState::Empty
+		    && state.active.state == AssignmentState::Active
+		    && (state.active.command_flags & CommandNav) != 0) {
+			stale_navigation = state.active;
+			stale_navigation.state = AssignmentState::Aborted;
+			stale_navigation.last_ack_result = MAVLINK_M_ACK_REJECTED;
+			stale_navigation.command_flags |= CommandStopPending;
+			++stale_navigation.status_sequence;
+		}
+
+		if (stale_navigation.state != AssignmentState::Empty) {
+			// Quarantine only the cancellation authority under the new endpoint
+			// header. The old task is never restored as Active, but its stop survives
+			// repeated MAVLink module restarts until a hold is confirmed and saved.
+			_active = Assignment{};
+			_deferred_navigation_stop = stale_navigation;
+
+			for (Assignment &assignment : _inbox) {
+				assignment = Assignment{};
+			}
+
+			for (Assignment &assignment : _terminal) {
+				assignment = Assignment{};
+			}
+
+			for (ControlRecord &control : _controls) {
+				control = ControlRecord{};
+			}
+
+			for (TrackIdentity &identity : _track_identities) {
+				identity = TrackIdentity{};
+			}
+
+			remember_terminal(stale_navigation, stale_navigation.state,
+					 stale_navigation.last_ack_result);
+
+			if (!save_state()) {
+				PX4_WARN("stale MAVLink-M navigation quarantine was not persisted");
+			}
+
+			return true;
+		}
+
+		if (!invalidate_persisted_state()) {
+			PX4_ERR("stale MAVLink-M state could not be invalidated");
+		}
+
 		return false;
 	}
 
@@ -2048,6 +3316,66 @@ bool MavlinkMHandler::load_state()
 	memcpy(_inbox, state.inbox, sizeof(_inbox));
 	memcpy(_terminal, state.terminal, sizeof(_terminal));
 	memcpy(_controls, state.controls, sizeof(_controls));
+
+	const bool migrated_previous_version = state.version == PreviousPersistenceVersion;
+
+	if (migrated_previous_version) {
+		// Version 6 had no per-cue execution effect. Preserve its audit state,
+		// but restore every assignment as receipt-only so an old padding byte
+		// can never become movement authority.
+		_active.execution_effect = mavlink_m_task_decision_s::EFFECT_DEFAULT;
+
+		for (Assignment &assignment : _inbox) {
+			assignment.execution_effect = mavlink_m_task_decision_s::EFFECT_DEFAULT;
+		}
+
+		for (Assignment &assignment : _terminal) {
+			assignment.execution_effect = mavlink_m_task_decision_s::EFFECT_DEFAULT;
+		}
+	}
+
+	if (Assignment *stop_marker = find_navigation_stop_marker()) {
+		// A distinct persisted bit, rather than historical CommandNav, records
+		// that a superseded command has not yet been durably replaced or stopped.
+		// Scan the full terminal ring so rejection or expiry of a later pending cue
+		// cannot hide this obligation across repeated MAVLink module restarts.
+		_deferred_navigation_stop = *stop_marker;
+		PX4_WARN("restored superseded MAVLink-M navigation stop");
+	}
+
+	bool recovered_uncommitted_movement = false;
+
+	if (_active.state == AssignmentState::Active
+	    && _active.last_ack_result == MAVLINK_M_ACK_RECEIVED
+	    && _active.command_flags == 0
+	    && assignment_requests_movement(_active)) {
+		// This is the durable stage between local acceptance and publication of
+		// its navigation command. A restart in that narrow window proves that no
+		// committed command exists. Return the cue to Pending so it requires a new
+		// explicit decision instead of restoring a commandless Active task.
+		Assignment retry = _active;
+		retry.state = AssignmentState::Pending;
+		retry.last_ack_result = MAVLINK_M_ACK_RECEIVED;
+		retry.restored = 1;
+		++retry.status_sequence;
+		Assignment *slot = find_free_inbox();
+
+		if (slot != nullptr) {
+			*slot = retry;
+			_active = Assignment{};
+			PX4_WARN("restored uncommitted MAVLink-M movement as pending");
+
+		} else {
+			// The normal staging transition always frees the candidate's inbox slot.
+			// If a CRC-valid but inconsistent state has no slot, fail the commandless
+			// task closed rather than making it impossible to decide or abort.
+			remember_terminal(retry, AssignmentState::Aborted, MAVLINK_M_ACK_FAILED);
+			_active = Assignment{};
+			PX4_WARN("aborted inconsistent uncommitted MAVLink-M movement");
+		}
+
+		recovered_uncommitted_movement = true;
+	}
 
 	if (_active.state != AssignmentState::Empty) {
 		_active.restored = 1;
@@ -2077,12 +3405,22 @@ bool MavlinkMHandler::load_state()
 
 	_active.name[sizeof(_active.name) - 1] = '\0';
 
+	if (_active.state == AssignmentState::Active
+	    && _active.message_id == MAVLINK_MSG_ID_TARGET_CUE
+	    && _active.cue_type == MAVLINK_M_CUE_TYPE_INVESTIGATE
+	    && _active.execution_effect == ActionInterceptCueAltitude
+	    && PX4_ISFINITE(_active.alt)
+	    && (_active.command_flags & CommandNav) != 0) {
+		abort_intercept("restart requires fresh acceptance");
+	}
+
 	for (Assignment &assignment : _terminal) {
 		assignment.name[sizeof(assignment.name) - 1] = '\0';
 	}
 
-	if (migrated_legacy_queue && !save_state()) {
-		PX4_WARN("failed to persist legacy MAVLink-M queue migration");
+	if ((migrated_previous_version || migrated_legacy_queue || recovered_uncommitted_movement)
+	    && !save_state()) {
+		PX4_WARN("failed to persist MAVLink-M state migration");
 	}
 
 	PX4_INFO("restored MAVLink-M assignment state");
@@ -2100,7 +3438,7 @@ bool MavlinkMHandler::save_state()
 	state.version = PersistenceVersion;
 	state.size = static_cast<uint16_t>(sizeof(state));
 	state.mavlink_instance = static_cast<uint8_t>(_instance);
-	state.source_system = static_cast<uint8_t>(_source_system);
+	state.source_system = persisted_system_selector(_source_system);
 	state.source_component = static_cast<uint8_t>(_source_component);
 	strncpy(state.profile_hash, AAGS_MAVLINK_M_CORE_XML_SHA256, sizeof(state.profile_hash) - 1);
 	state.active = _active;

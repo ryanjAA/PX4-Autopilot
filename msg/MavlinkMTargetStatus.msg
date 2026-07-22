@@ -1,6 +1,6 @@
 # Display and local state for the finalized MAVLink-M cue/handover endpoint.
-# Optional INVESTIGATE-cue navigation and altitude policy are controlled
-# separately by the local MAV_M_ACTION parameter.
+# MAV_M_ACTION is the local movement permission ceiling. action_mode reports
+# that ceiling while Pending and the selected per-cue effect after acceptance.
 
 uint64 timestamp
 uint64 assignment_time_usec
@@ -27,6 +27,13 @@ uint8 cue_type
 uint8 action_mode
 uint8 queue_depth
 uint8 command_flags
+
+uint8 INTERCEPT_PHASE_NONE = 0
+uint8 INTERCEPT_PHASE_TRANSIT = 1
+uint8 INTERCEPT_PHASE_DWELL = 2
+uint8 INTERCEPT_PHASE_COMPLETE = 3
+uint8 INTERCEPT_PHASE_ABORTED = 4
+uint8 intercept_phase
 
 bool prompt
 bool restored

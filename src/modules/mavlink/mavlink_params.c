@@ -160,9 +160,10 @@ PARAM_DEFINE_INT32(MAV_RADIO_TOUT, 5);
  * MAVLink-M endpoint mode
  *
  * Finalized TARGET_CUE and TARGET_HANDOVER traffic is accepted only on the
- * selected MAVLink instance and from the exact source endpoint. The finalized
- * payload has no destination fields: the selected vehicle link supplies
- * routing. Mode 2 additionally requires a valid 32-byte MAVLink 2 signing key at
+ * selected MAVLink instance and from the configured source selector. The source
+ * component is always exact; MAV_M_SRC_SYS may be exact or the documented
+ * wildcard. The finalized payload has no destination fields, so the selected
+ * vehicle link supplies routing. Mode 2 additionally requires a valid 32-byte MAVLink 2 signing key at
  * PX4_STORAGEDIR/mavlink_m_signing.key and rejects every unsigned frame on the
  * selected physical cue link.
  *
@@ -200,10 +201,44 @@ PARAM_DEFINE_INT32(MAV_M_LNK_ID, 0);
 PARAM_DEFINE_INT32(MAV_M_INST, 0);
 
 /**
- * Exact permitted cue-source system ID
+ * MAVLink output instance for ESAD arming
  *
+ * Selects the one MAVLink output instance used when forwarding an incoming
+ * ESAD_ARMING command. Minus one preserves standard MAVLink forwarding. Values
+ * zero through five restrict ESAD_ARMING forwarding to that instance. Standard
+ * forwarding may copy the broadcast to every other eligible forwarding-enabled
+ * instance; it is not a synonym for one physical telemetry port.
+ *
+ * The instance receiving ESAD_ARMING from AAGS and the selected output instance
+ * must both be running with their MAV_X_FORWARD parameters enabled. This
+ * parameter does not start a MAVLink instance or enable forwarding. ESAD_STATE
+ * return traffic and all other messages retain standard forwarding.
+ *
+ * @value -1 Standard forwarding
+ * @value 0 MAVLink instance 0
+ * @value 1 MAVLink instance 1
+ * @value 2 MAVLink instance 2
+ * @value 3 MAVLink instance 3
+ * @value 4 MAVLink instance 4
+ * @value 5 MAVLink instance 5
  * @group MAVLink-M
- * @min 1
+ * @min -1
+ * @max 5
+ */
+PARAM_DEFINE_INT32(MAV_M_ESAD_I, -1);
+
+/**
+ * Permitted cue-source system ID
+ *
+ * Selects one exact nonzero MAVLink system ID, or minus one to accept any
+ * nonzero system ID on MAV_M_INST. The exact MAV_M_SRC_CMP check still
+ * applies. This wildcard changes identity matching only. It does not consume
+ * cues from any other MAVLink instance, enable forwarding, or trust observer
+ * and telemetry links.
+ *
+ * @value -1 Any nonzero system on MAV_M_INST
+ * @group MAVLink-M
+ * @min -1
  * @max 255
  * @reboot_required true
  */
@@ -225,7 +260,9 @@ PARAM_DEFINE_INT32(MAV_M_SRC_CMP, 190);
  * TARGET_CUE is received and acknowledged on MAV_M_INST, while the locally
  * owned AAGS sees the pending cue and may request Accept/Reject on this
  * instance. Minus one disables network decisions; RC and the local PX4
- * console remain available.
+ * console remain available. MAV_M_CTL_SYS=-1 widens the permitted system ID
+ * only on this selected instance. It never enables decisions on another
+ * physical, observer, or forwarding route.
  *
  * MAV_M_SAME_EP=0 requires this to be a physical route distinct from
  * MAV_M_INST. MAV_M_SAME_EP=1 requires it to equal MAV_M_INST.
@@ -238,15 +275,24 @@ PARAM_DEFINE_INT32(MAV_M_SRC_CMP, 190);
 PARAM_DEFINE_INT32(MAV_M_CTL_INST, -1);
 
 /**
- * Exact owner-control AAGS system ID
+ * Owner-control AAGS system ID
  *
- * Only this MAVLink system may request a decision on MAV_M_CTL_INST. Zero
- * disables network decisions. MAV_M_SAME_EP=0 requires an authority distinct
- * from the cue source. MAV_M_SAME_EP=1 requires the exact same authority and
- * still requires a separate explicit operator decision after cue receipt.
+ * Selects one exact nonzero MAVLink system ID, or minus one to allow any
+ * nonzero system on MAV_M_CTL_INST to request Accept/Reject. Zero disables
+ * network decisions. MAV_M_CTL_CMP remains an exact check. The wildcard does
+ * not trust any other MAVLink instance and signed mode still requires the
+ * configured physical link and signing key.
  *
+ * With MAV_M_SAME_EP=0, MAV_M_CTL_INST must remain distinct from MAV_M_INST;
+ * wildcard identities may overlap because the configured routes preserve the
+ * cue-source and owner-control roles. With MAV_M_SAME_EP=1, source and control
+ * instances, system selectors, and component IDs must match, so use minus one
+ * for both system selectors or an identical exact value.
+ *
+ * @value -1 Any nonzero system on MAV_M_CTL_INST
+ * @value 0 Network decisions disabled
  * @group MAVLink-M
- * @min 0
+ * @min -1
  * @max 255
  * @reboot_required true
  */
@@ -254,6 +300,9 @@ PARAM_DEFINE_INT32(MAV_M_CTL_SYS, 0);
 
 /**
  * Exact owner-control AAGS component ID
+ *
+ * This component check always applies, including when MAV_M_CTL_SYS=-1. It is
+ * evaluated only on MAV_M_CTL_INST and does not authorize another route.
  *
  * @group MAVLink-M
  * @min 1
@@ -267,7 +316,8 @@ PARAM_DEFINE_INT32(MAV_M_CTL_CMP, 190);
  *
  * Used only by signed physical mode. MAV_M_SAME_EP=0 requires a value unique
  * from MAV_M_LNK_ID. MAV_M_SAME_EP=1 requires the same value because cue and
- * control traffic share one physical link.
+ * control traffic share one physical link. MAV_M_CTL_SYS=-1 does not weaken
+ * signing or extend this identifier to other MAVLink instances.
  *
  * @group MAVLink-M
  * @min 0
@@ -277,23 +327,25 @@ PARAM_DEFINE_INT32(MAV_M_CTL_CMP, 190);
 PARAM_DEFINE_INT32(MAV_M_CTL_LNK, 1);
 
 /**
- * Allow one exact AAGS endpoint to offer and decide cues
+ * Allow one AAGS route to offer and decide cues
  *
  * Zero requires the cue source and owner-control authority to use distinct
- * MAVLink instances and distinct MAVLink identities. Value one selects the
- * local-owner workflow: MAV_M_INST must equal MAV_M_CTL_INST,
- * MAV_M_SRC_SYS/CMP must equal MAV_M_CTL_SYS/CMP, and signed mode also
- * requires MAV_M_LNK_ID to equal MAV_M_CTL_LNK.
+ * MAVLink instances. Identical exact system/component identities are rejected;
+ * wildcard identities may overlap because the configured routes preserve each
+ * role. Value one selects the local-owner workflow: MAV_M_INST must equal
+ * MAV_M_CTL_INST, MAV_M_SRC_SYS/CMP must equal MAV_M_CTL_SYS/CMP, and signed
+ * mode also requires MAV_M_LNK_ID to equal MAV_M_CTL_LNK. Matching system
+ * selectors means the same exact value or minus one on both sides.
  *
- * This setting does not auto-accept a cue. The exact owner must still make an
- * explicit Accept/Reject decision through AAGS, RC, or the local console
+ * This setting does not auto-accept a cue. An authorized owner must still make
+ * an explicit Accept/Reject decision through AAGS, RC, or the local console
  * before an accepted-cue navigation mode can publish a reposition command.
  *
  * @group MAVLink-M
  * @min 0
  * @max 1
  * @value 0 Separate cue source and owner-control endpoints
- * @value 1 Same exact local-owner endpoint
+ * @value 1 Same local-owner route and source selector
  * @reboot_required true
  */
 PARAM_DEFINE_INT32(MAV_M_SAME_EP, 0);
@@ -348,34 +400,109 @@ PARAM_DEFINE_INT32(MAV_M_RC_ACC, 1700);
 PARAM_DEFINE_INT32(MAV_M_MAX_AGE, 30);
 
 /**
- * Accepted-cue navigation mode
+ * Accepted-cue navigation permission
  *
- * Zero keeps the endpoint receipt/status only. Value 1 navigates laterally to
- * an accepted INVESTIGATE TARGET_CUE at the aircraft's AMSL altitude sampled
- * at acceptance; TARGET_CUE.alt is deliberately ignored. Value 2 enables the
- * trusted-source AAGS intercept profile: a finite TARGET_CUE.alt becomes the
- * reposition AMSL altitude, while NaN still keeps the acceptance-time aircraft
- * altitude. MAVLink-M defines no INTERCEPT cue enum, so value 2 is a local PX4
- * policy and does not add or reinterpret a wire enum.
+ * This is the local movement permission ceiling. Zero keeps the endpoint
+ * receipt/status only. Value 1 permits a local acceptance to select level
+ * travel. Value 2 permits either level travel or the trusted-source intercept
+ * profile for each exact accepted cue. A finite-altitude intercept reaches the
+ * cue coordinate at TARGET_CUE.alt. For fixed wing, Navigator first computes a
+ * level approach entry from FW_P_LIM_MIN or FW_P_LIM_MAX,
+ * FW_T_SINK_MAX or FW_T_CLMB_MAX, and FW_AIRSPD_MAX. If the cue is too close,
+ * the entry is placed behind the aircraft so it can fly away level, turn, and
+ * establish the bounded slope. Navigator must report a token-matched crossing
+ * within the fixed 5 m horizontal and vertical hit bounds before the
+ * configured post-crossing dwell can begin. An explicit
+ * intercept selection requires a finite cue altitude. Legacy RC and console
+ * acceptance select the configured ceiling as their default effect and retain
+ * the previous one-phase level behavior for a NaN altitude. MAVLink-M defines
+ * no INTERCEPT cue enum, so the per-cue choice is receiver-local and does not
+ * add or reinterpret a wire enum.
  *
  * Motion is possible only after the cue has been durably stored and locally
- * accepted by RC or the local console. The vehicle must already be airborne,
- * armed, and in Hold (AUTO_LOITER), with fresh global position and land
- * detector state showing no landed, maybe-landed, ground-contact, or freefall
- * condition, and with no failsafe/failure indication. Reposition is attempted
- * once at that explicit acceptance; an unsafe, restored, or merely pending cue
- * never starts moving later. A second acceptance is blocked while another cue
- * is active and remains pending until a fresh decision after the active cue
- * clears. PX4 1.14 requires the DO_REPOSITION change-mode flag (param2=1);
- * publication already requires AUTO_LOITER, so the command reasserts the
- * current Hold intention rather than selecting a different mode. This endpoint
- * never arms, controls a payload, or turns a handover into motion.
+ * accepted by an authorized owner command, RC, or the local console. The vehicle
+ * must already be airborne, armed, and in Hold (AUTO_LOITER), with fresh
+ * global position and land detector state showing no landed, maybe-landed,
+ * ground-contact, or freefall condition, and with no failsafe/failure
+ * indication. Reposition is attempted at that explicit acceptance. Intercept
+ * completion additionally requires the exact approach setpoints to remain
+ * owned, a fresh source, continuous arrival dwell, and a cue-altitude change
+ * no larger than MAV_M_INT_DZ. Task abort or expiry, mode exit, disarm,
+ * failsafe, source staleness, setpoint override, policy change, or restart
+ * permanently aborts that acceptance.
+ * An unsafe, restored, or merely pending cue never starts moving later. A new
+ * cue remains Pending while another cue is Active. Explicitly accepting it
+ * first revalidates every requested-effect gate. A blocked replacement leaves
+ * the old cue Active and the new cue Pending. A valid replacement durably
+ * aborts the old cue, activates the new cue, and publishes the new navigation
+ * request without an intervening hold. PX4 1.14 requires the
+ * DO_REPOSITION change-mode flag (param2=1); publication already requires
+ * AUTO_LOITER, so the command reasserts the current Hold intention rather than
+ * selecting a different mode. This endpoint never arms, controls a payload, or
+ * turns a handover into motion.
  *
  * @group MAVLink-M
  * @min 0
  * @max 2
- * @value 0 Receipt and local acceptance only
- * @value 1 Reposition laterally at acceptance-time aircraft AMSL altitude
- * @value 2 Trusted-source intercept: use finite cue AMSL altitude, otherwise current
+ * @value 0 Deny movement; receipt and local acceptance only
+ * @value 1 Permit level travel only
+ * @value 2 Permit level travel or trusted-source intercept
  */
 PARAM_DEFINE_INT32(MAV_M_ACTION, 0);
+
+/**
+ * Intercept post-crossing dwell radius
+ *
+ * A finite-altitude action-2 cue uses waypoint guidance through the cue
+ * coordinate at cue altitude. Crossing the target plane within the fixed 5 m
+ * horizontal and vertical hit bounds, plus a token-matched Navigator
+ * completion ACK, is the mandatory arrival proof and cannot be replaced or
+ * relaxed by this parameter. After that successful crossing, the aircraft
+ * must remain within this horizontal distance during MAV_M_INT_DWL before the
+ * intercept status becomes complete. For fixed wing,
+ * the effective dwell gate is the larger of this value and the absolute
+ * NAV_LOITER_RAD plus a 10 m tracking margin. For example, an 80 m loiter
+ * radius makes the effective dwell gate at least 90 m even if this parameter
+ * is set to 25 m.
+ *
+ * @group MAVLink-M
+ * @unit m
+ * @min 1
+ * @max 500
+ * @decimal 1
+ */
+PARAM_DEFINE_FLOAT(MAV_M_INT_RAD, 25.0f);
+
+/**
+ * Intercept post-crossing dwell
+ *
+ * Continuous time inside the effective horizontal dwell radius after the
+ * successful, token-matched target-plane crossing required before completion
+ * is latched. Leaving the radius, losing the owning task, or losing required
+ * fresh state resets the full timer. Zero removes the added wait but does not
+ * bypass the target-plane crossing or any other safety gate.
+ *
+ * @group MAVLink-M
+ * @unit s
+ * @min 0
+ * @max 60
+ * @decimal 1
+ */
+PARAM_DEFINE_FLOAT(MAV_M_INT_DWL, 3.0f);
+
+/**
+ * Maximum intercept altitude change
+ *
+ * Maximum absolute vertical difference between the aircraft's
+ * acceptance-time AMSL altitude and a finite TARGET_CUE.alt. A larger
+ * difference prevents the intercept for that acceptance. This is a
+ * permission limit checked before movement. It is not a descent rate, a target
+ * altitude, or a terrain-clearance setting.
+ *
+ * @group MAVLink-M
+ * @unit m
+ * @min 0
+ * @max 1000
+ * @decimal 1
+ */
+PARAM_DEFINE_FLOAT(MAV_M_INT_DZ, 100.0f);

@@ -35,3 +35,8 @@ bool gliding_enabled		# commands the vehicle to glide if the capability is avail
 float32 cruising_throttle	# the generally desired cruising throttle (not a hard constraint), only has an effect for rover
 
 bool disable_weather_vane   # VTOL: disable (in auto mode) the weather vane feature that turns the nose into the wind
+
+# Internal guarded MAVLink-M intercept waypoint. Fixed-wing position control
+# keeps the altitude first-order hold anchored to the exact coordinate and may
+# use the configured maximum climb or sink rate for this waypoint only.
+bool mavlink_m_exact_altitude

@@ -96,6 +96,27 @@ mavlink_message_t *mavlink_get_channel_buffer(uint8_t channel) { return mavlink_
 
 static void usage();
 
+#if defined(MAVLINK_MSG_ID_ESAD_ARMING)
+static constexpr bool esad_forwarding_instance_selected(uint32_t message_id, int selected_instance,
+		int destination_instance)
+{
+	return message_id != MAVLINK_MSG_ID_ESAD_ARMING
+	       || selected_instance == -1
+	       || selected_instance == destination_instance;
+}
+
+static_assert(esad_forwarding_instance_selected(MAVLINK_MSG_ID_ESAD_ARMING, -1, 0),
+	      "MAV_M_ESAD_I=-1 must preserve standard ESAD_ARMING forwarding");
+static_assert(esad_forwarding_instance_selected(MAVLINK_MSG_ID_ESAD_ARMING, 2, 2),
+	      "ESAD_ARMING must reach the selected MAVLink instance");
+static_assert(!esad_forwarding_instance_selected(MAVLINK_MSG_ID_ESAD_ARMING, 2, 1),
+	      "ESAD_ARMING must not reach an unselected MAVLink instance");
+#if defined(MAVLINK_MSG_ID_ESAD_STATE)
+static_assert(esad_forwarding_instance_selected(MAVLINK_MSG_ID_ESAD_STATE, 2, 1),
+	      "ESAD_STATE must retain standard forwarding");
+#endif
+#endif
+
 #if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
 static int task_decision_command(int argc, char *argv[])
 {
@@ -523,6 +544,10 @@ Mavlink::forward_message(const mavlink_message_t *msg, Mavlink *self)
 	int target_system_id = 0;
 	int target_component_id = 0;
 
+#if defined(MAVLINK_MSG_ID_ESAD_ARMING)
+	const int selected_esad_instance = self->get_esad_arming_forwarding_instance();
+#endif
+
 	// might be nullptr if message is unknown
 	if (meta) {
 		// Extract target system and target component if set
@@ -549,6 +574,14 @@ Mavlink::forward_message(const mavlink_message_t *msg, Mavlink *self)
 
 	for (Mavlink *inst : mavlink_module_instances) {
 		if (inst && (inst != self) && (inst->get_forwarding_on())) {
+#if defined(MAVLINK_MSG_ID_ESAD_ARMING)
+			// MAV_M_ESAD_I changes only ESAD_ARMING fanout. ESAD_STATE
+			// return traffic and every other message keep standard forwarding.
+			if (!esad_forwarding_instance_selected(msg->msgid, selected_esad_instance, inst->get_instance_id())) {
+				continue;
+			}
+#endif
+
 			// Pass message only if target component was seen before
 			if (inst->_receiver.component_was_seen(target_system_id, target_component_id)) {
 				inst->pass_message(msg);
