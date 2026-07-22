@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 import uuid
 
 from endpoint_tool import Endpoint, UdpTransport, fixed_text, load_dialect, text_field
@@ -27,6 +28,9 @@ SOURCE_SYSTEM = 255
 SOURCE_COMPONENT = 190
 OWNER_SYSTEM = 254
 OWNER_COMPONENT = 190
+WILDCARD_SOURCE_SYSTEM = 253
+WILDCARD_OWNER_SYSTEM = 252
+WILDCARD_REJECT_SYSTEM = 251
 SITL_INSTANCE = 1
 VEHICLE_SYSTEM = SITL_INSTANCE + 1
 VEHICLE_COMPONENT = 1
@@ -148,6 +152,9 @@ class Px4Sitl:
             "param set MAV_M_RC_ACC 1700",
             f"param set MAV_M_MAX_AGE {max_age}",
             "param set MAV_M_ACTION 0",
+            "param set MAV_M_INT_RAD 25",
+            "param set MAV_M_INT_DWL 3",
+            "param set MAV_M_INT_DZ 100",
             "param save",
         ]
         for command in commands:
@@ -168,11 +175,18 @@ class Px4Sitl:
             "MAV_M_SAME_EP": 0,
             "MAV_M_MAX_AGE": max_age,
             "MAV_M_ACTION": 0,
+            "MAV_M_INT_RAD": 25,
+            "MAV_M_INT_DWL": 3,
+            "MAV_M_INT_DZ": 100,
         }
         missing = [
             f"{name}={value}"
             for name, value in expected.items()
-            if re.search(rf"\b{re.escape(name)}\b[^\n]*:\s*{value}\s*$", output, re.MULTILINE) is None
+            if re.search(
+                rf"\b{re.escape(name)}\b[^\n]*:\s*{value}(?:\.0+)?\s*$",
+                output,
+                re.MULTILINE,
+            ) is None
         ]
         if missing:
             raise AcceptanceFailure(f"PX4 endpoint parameter verification failed: {missing!r}\n{output}")
@@ -204,10 +218,21 @@ class Px4Sitl:
         time.sleep(0.1)
         return self.text_since(mark)
 
-    def wait_target_status(self, required: list[str], timeout: float) -> str:
+    def wait_target_status(
+        self,
+        required: list[str],
+        timeout: float,
+        keepalive: Callable[[], None] | None = None,
+        keepalive_interval: float = 5.0,
+    ) -> str:
         deadline = time.monotonic() + timeout
+        next_keepalive = 0.0
         last_status = ""
         while time.monotonic() < deadline:
+            now = time.monotonic()
+            if keepalive is not None and now >= next_keepalive:
+                keepalive()
+                next_keepalive = now + keepalive_interval
             last_status = self.status()
             if all(value in last_status for value in required):
                 return last_status
@@ -296,10 +321,17 @@ class Px4Sitl:
         time.sleep(0.5)
 
     def restore_endpoint_parameter(self, name: str, value: int) -> None:
-        mark = self.mark()
         self.command(f"param set {name} {value}")
-        self.wait_for("restored MAVLink-M assignment state", mark, 5.0)
-        time.sleep(0.5)
+        time.sleep(0.75)
+        status = self.parameter_status(name)
+        if re.search(
+            rf"\b{re.escape(name)}\b[^\n]*:\s*{value}\s*$",
+            status,
+            re.MULTILINE,
+        ) is None:
+            raise AcceptanceFailure(
+                f"{name} did not restore to {value}\n{status}"
+            )
 
     def stop(self) -> None:
         process = self.process
@@ -364,6 +396,37 @@ def wait_for_ack(endpoint: Endpoint, message_id: int, instance: int, timeout: fl
     raise AcceptanceFailure(f"no ACK for msgid={message_id} instance={instance}")
 
 
+def wait_for_cue_ack_set(
+    endpoint: Endpoint,
+    expected: dict[int, tuple[int, str]],
+    timeout: float = 4.0,
+) -> None:
+    """Collect multiple cue ACKs and require their specified wire order."""
+    remaining = dict(expected)
+    expected_order = list(expected)
+    observed_order: list[int] = []
+    deadline = time.monotonic() + timeout
+    while remaining and time.monotonic() < deadline:
+        for message in endpoint.receive(min(0.25, deadline - time.monotonic())):
+            if (
+                message.get_type() != "MAVLINK_M_ACK"
+                or message.ack_msgid != endpoint.dialect.MAVLINK_MSG_ID_TARGET_CUE
+                or message.ack_instance not in remaining
+            ):
+                continue
+            expected_result, reason_fragment = remaining.pop(message.ack_instance)
+            assert_ack(message, expected_result, reason_fragment)
+            observed_order.append(message.ack_instance)
+    if remaining:
+        raise AcceptanceFailure(
+            f"missing cue ACKs for instances {sorted(remaining)}"
+        )
+    if observed_order != expected_order:
+        raise AcceptanceFailure(
+            f"cue ACK order {observed_order} did not match {expected_order}"
+        )
+
+
 def expect_no_ack(endpoint: Endpoint, message_id: int, instance: int, timeout: float = 1.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -377,7 +440,12 @@ def expect_no_ack(endpoint: Endpoint, message_id: int, instance: int, timeout: f
                     f"unexpected ACK for wrong source msgid={message_id} instance={instance}"
                 )
 
-def send_owner_decision(endpoint: Endpoint, cue_id: int, accept: bool) -> None:
+def send_owner_decision(
+    endpoint: Endpoint,
+    cue_id: int,
+    accept: bool,
+    requested_effect: int = 0,
+) -> None:
     endpoint.mav.command_long_send(
         VEHICLE_SYSTEM,
         VEHICLE_COMPONENT,
@@ -387,7 +455,7 @@ def send_owner_decision(endpoint: Endpoint, cue_id: int, accept: bool) -> None:
         cue_id & 0xFFFF,
         (cue_id >> 16) & 0xFFFF,
         endpoint.dialect.MAVLINK_MSG_ID_TARGET_CUE,
-        0,
+        requested_effect,
         0,
         0,
     )
@@ -488,6 +556,8 @@ def wait_for_owner_snapshot(
                     snapshot["source"] = value
                 elif name == "AAGS_CFG":
                     snapshot["configuration"] = value
+                elif name == "AAGS_IPHS":
+                    snapshot["intercept_phase"] = value
                 elif name == expected_state_name:
                     state_cue = value & 0xFFFFFFFF
                     required = {
@@ -497,6 +567,7 @@ def wait_for_owner_snapshot(
                         "alt",
                         "source",
                         "configuration",
+                        "intercept_phase",
                     }
                     if (
                         state_cue == cue_id
@@ -513,6 +584,23 @@ def wait_for_owner_snapshot(
         f"owner link did not publish a correlated {expected_state_name} "
         f"snapshot for cue {cue_id}; partial={snapshot!r}; observed={observed!r}"
     )
+
+
+def connect_owner_endpoint(dialect, signed: bool) -> tuple[Endpoint, UdpTransport]:
+    transport = UdpTransport(
+        ("127.0.0.1", CONTROL_AAGS_UDP_PORT),
+        ("127.0.0.1", CONTROL_PX4_UDP_PORT),
+    )
+    endpoint = Endpoint(
+        dialect,
+        transport,
+        OWNER_SYSTEM,
+        OWNER_COMPONENT,
+        SIGNING_KEY if signed else None,
+        CONTROL_SIGNING_LINK_ID,
+    )
+    establish_udp_peer(endpoint)
+    return endpoint, transport
 
 
 def wait_for_source_message(
@@ -562,14 +650,19 @@ def expect_no_local_only_forward(
                 )
 
 
-def assert_ack(message, result: int, reason_contains: str) -> None:
+def assert_ack(
+    message,
+    result: int,
+    reason_contains: str,
+    source_system: int = SOURCE_SYSTEM,
+) -> None:
     reason = text_field(message.reason)
     if message.result != result or reason_contains not in reason:
         raise AcceptanceFailure(
             f"unexpected ACK result={message.result} reason={reason!r}; "
             f"wanted result={result} containing {reason_contains!r}"
         )
-    if message.origin_sysid != SOURCE_SYSTEM or message.ack_sysid != VEHICLE_SYSTEM:
+    if message.origin_sysid != source_system or message.ack_sysid != VEHICLE_SYSTEM:
         raise AcceptanceFailure(
             "ACK did not preserve source/receiving-vehicle correlation"
         )
@@ -612,6 +705,7 @@ def make_cue(
     now_usec: int,
     name: str,
     lat: int = 454671000,
+    lon: int = -737578000,
     cue_type: int = 1,
     alt_msl: float = 50.0,
 ):
@@ -620,7 +714,7 @@ def make_cue(
         cue_id,
         TRACK_SET,
         lat,
-        -737578000,
+        lon,
         alt_msl,
         math.nan,
         math.nan,
@@ -937,6 +1031,21 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             )
 
             started = time.monotonic()
+            send_owner_decision(owner_endpoint, 731, True, requested_effect=1)
+            wait_for_command_ack(owner_endpoint, dialect.MAV_RESULT_DENIED)
+            send_owner_decision(owner_endpoint, 731, True, requested_effect=3)
+            wait_for_command_ack(owner_endpoint, dialect.MAV_RESULT_FAILED)
+            px4.wait_target_status(
+                ["instance_id: 731", "state: 1", "prompt: True"], 3.0
+            )
+            record(
+                results,
+                "owner_effect_permission_ceiling",
+                started,
+                "explicit level travel above MAV_M_ACTION=0 was denied, invalid effect 3 failed, and the exact cue stayed Pending",
+            )
+
+            started = time.monotonic()
             px4.command("param set MAV_M_ACTION 15")
             time.sleep(0.25)
             sanitized_action = px4.parameter_status("MAV_M_ACTION")
@@ -1019,55 +1128,12 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             "stored pending",
         )
         px4.command("mavlink task accept 732 53001")
-        expect_no_ack(
+        wait_for_cue_ack_set(
             endpoint,
-            dialect.MAVLINK_MSG_ID_TARGET_CUE,
-            732,
-            timeout=1.0,
-        )
-        px4.wait_target_status(
-            [
-                "instance_id: 732",
-                "state: 1",
-                "queue_depth: 1",
-                "command_flags: 0",
-                "prompt: True",
-            ],
-            3.0,
-        )
-        endpoint.mav.send(cue_one)
-        assert_ack(
-            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 731),
-            dialect.MAVLINK_M_ACK_ACCEPTED,
-            "duplicate idempotent replay",
-        )
-        px4.command("mavlink task reject 731 53001")
-        assert_ack(
-            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 731),
-            dialect.MAVLINK_M_ACK_REJECTED,
-            "local operator aborted",
-        )
-        px4.wait_target_status(
-            [
-                "instance_id: 732",
-                "state: 1",
-                "queue_depth: 1",
-                "command_flags: 0",
-                "prompt: True",
-            ],
-            3.0,
-        )
-        endpoint.mav.send(blocked_cue)
-        assert_ack(
-            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 732),
-            dialect.MAVLINK_M_ACK_RECEIVED,
-            "duplicate idempotent replay",
-        )
-        px4.command("mavlink task accept 732 53001")
-        assert_ack(
-            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 732),
-            dialect.MAVLINK_M_ACK_ACCEPTED,
-            "local operator accepted active target",
+            {
+                731: (dialect.MAVLINK_M_ACK_REJECTED, "superseded"),
+                732: (dialect.MAVLINK_M_ACK_ACCEPTED, "previous cue superseded"),
+            },
         )
         px4.wait_target_status(
             [
@@ -1079,6 +1145,12 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             ],
             3.0,
         )
+        endpoint.mav.send(cue_one)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 731),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "duplicate idempotent replay",
+        )
         px4.command("mavlink task reject 732 53001")
         assert_ack(
             wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 732),
@@ -1087,13 +1159,13 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         )
         record(
             results,
-            "active_assignment_requires_fresh_acceptance",
+            "accepted_cue_explicitly_supersedes_active",
             started,
-            "cue B stayed RECEIVED/Pending while A was active and after A aborted; a fresh B acceptance then succeeded",
+            "accepting cue B durably aborted cue A, ACKed A rejected before B accepted, and made B the sole Active cue",
         )
 
         px4.command("param set MAV_M_ACTION 1")
-        time.sleep(0.3)
+        time.sleep(1.0)
         px4.wait_vehicle_status(
             [
                 "arming_state: 1",
@@ -1108,6 +1180,31 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             ["arming_state: 1", "nav_state: 4", "failsafe: False"],
             5.0,
         )
+
+        non_movement_cue = make_cue(
+            endpoint,
+            754,
+            int(time.time() * 1_000_000),
+            "observe while safe",
+            cue_type=2,
+        )
+        endpoint.send_frozen(non_movement_cue)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 754),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending",
+        )
+        px4.command("mavlink task accept 754 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 754),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "local operator accepted",
+        )
+        px4.wait_target_status(
+            ["instance_id: 754", "state: 2", "command_flags: 0"],
+            3.0,
+        )
+
         unsafe_cue = make_cue(
             endpoint,
             735,
@@ -1124,15 +1221,19 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         px4.command("mavlink task accept 735 53001")
         assert_ack(
             wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 735),
-            dialect.MAVLINK_M_ACK_ACCEPTED,
-            "local operator accepted",
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "movement blocked",
         )
-        unsafe_status = px4.status()
-        if "instance_id: 735" not in unsafe_status or "command_flags: 0" not in unsafe_status:
-            raise AcceptanceFailure(
-                "ACTION=1 moved or marked a vehicle that was not already armed in Hold\n"
-                + unsafe_status
-            )
+        px4.wait_target_status(
+            [
+                "instance_id: 735",
+                "state: 1",
+                "queue_depth: 1",
+                "command_flags: 0",
+                "prompt: True",
+            ],
+            3.0,
+        )
         px4.command("commander arm")
         px4.wait_vehicle_status(
             [
@@ -1145,14 +1246,34 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         )
         time.sleep(0.75)
         delayed_status = px4.status()
-        if "instance_id: 735" not in delayed_status or "command_flags: 0" not in delayed_status:
+        if (
+            "instance_id: 735" not in delayed_status
+            or "state: 1" not in delayed_status
+            or "command_flags: 0" not in delayed_status
+        ):
             raise AcceptanceFailure(
-                "previously accepted cue dispatched after a later armed-Hold transition\n"
+                "blocked replacement cue did not remain Pending after a later armed-Hold transition\n"
                 + delayed_status
             )
+        endpoint.mav.send(non_movement_cue)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 754),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "duplicate idempotent replay",
+        )
         px4.command("mavlink task reject 735 53001")
         assert_ack(
             wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 735),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator rejected",
+        )
+        px4.wait_target_status(
+            ["instance_id: 754", "state: 2", "command_flags: 0"],
+            3.0,
+        )
+        px4.command("mavlink task reject 754 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 754),
             dialect.MAVLINK_M_ACK_REJECTED,
             "local operator aborted",
         )
@@ -1172,11 +1293,11 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         px4.command("mavlink task accept 745 53001")
         assert_ack(
             wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 745),
-            dialect.MAVLINK_M_ACK_ACCEPTED,
-            "local operator accepted",
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "movement blocked",
         )
         ground_status = px4.wait_target_status(
-            ["instance_id: 745", "state: 2", "command_flags: 0"],
+            ["instance_id: 745", "state: 1", "command_flags: 0", "prompt: True"],
             3.0,
         )
         px4.command("commander disarm")
@@ -1206,23 +1327,72 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         delayed_ground_status = px4.status()
         if (
             "instance_id: 745" not in delayed_ground_status
+            or "state: 1" not in delayed_ground_status
             or "command_flags: 0" not in delayed_ground_status
         ):
             raise AcceptanceFailure(
-                "ground-accepted cue dispatched after a later takeoff\n"
+                "ground-blocked cue did not remain Pending after a later takeoff\n"
                 + delayed_ground_status
             )
         px4.command("mavlink task reject 745 53001")
         assert_ack(
             wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 745),
             dialect.MAVLINK_M_ACK_REJECTED,
-            "local operator aborted",
+            "local operator rejected",
         )
         record(
             results,
             "reposition_requires_existing_safe_flight_state",
             started,
-            "disarmed and armed-ground acceptances stayed inert through later arming and takeoff",
+            "a blocked movement replacement stayed Pending while the existing Observe cue remained Active and never auto-promoted",
+        )
+
+        started = time.monotonic()
+        stale_source_cue = make_cue(
+            endpoint,
+            758,
+            int(time.time() * 1_000_000),
+            "stale level travel",
+        )
+        endpoint.send_frozen(stale_source_cue)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 758),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending",
+        )
+        px4.wait_target_status(
+            ["instance_id: 758", "state: 1", "source_fresh: False"],
+            45.0,
+        )
+        px4.command("mavlink task accept 758 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 758),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "movement blocked: cue source is stale",
+        )
+        px4.wait_target_status(
+            ["instance_id: 758", "state: 1", "command_flags: 0", "prompt: True"],
+            3.0,
+        )
+        endpoint.mav.heartbeat_send(
+            dialect.MAV_TYPE_GCS,
+            dialect.MAV_AUTOPILOT_INVALID,
+            0,
+            0,
+            0,
+        )
+        time.sleep(0.25)
+        px4.command("mavlink task reject 758 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 758),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator rejected",
+        )
+        record(
+            results,
+            "level_movement_requires_fresh_cue_source",
+            started,
+            "level travel from a source silent for 15 seconds stayed Pending and issued no navigation command",
         )
 
         started = time.monotonic()
@@ -1298,6 +1468,61 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             raise AcceptanceFailure(
                 "one-shot vehicle_command had no timestamp\n" + vehicle_command
             )
+
+        supersede_started = time.monotonic()
+        replacement_lat = 454691000
+        replacement_lon = -737558000
+        replacement_cue = make_cue(
+            endpoint,
+            759,
+            int(time.time() * 1_000_000),
+            "replacement travel",
+            lat=replacement_lat,
+            lon=replacement_lon,
+            alt_msl=999.0,
+        )
+        endpoint.send_frozen(replacement_cue)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 759),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending",
+        )
+        px4.command("mavlink task accept 759 53001")
+        wait_for_cue_ack_set(
+            endpoint,
+            {
+                736: (dialect.MAVLINK_M_ACK_REJECTED, "superseded"),
+                759: (dialect.MAVLINK_M_ACK_ACCEPTED, "previous cue superseded"),
+            },
+        )
+        px4.wait_target_status(
+            ["instance_id: 759", "state: 2", "command_flags: 1"],
+            3.0,
+        )
+        replacement_command = px4.vehicle_command_status()
+        replacement_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", replacement_command
+        )
+        if (
+            replacement_timestamp is None
+            or int(replacement_timestamp.group(1))
+            <= int(original_command_timestamp.group(1))
+            or re.search(r"\bcommand:\s*192\b", replacement_command) is None
+            or abs(output_float(replacement_command, "param5") - replacement_lat * 1e-7) > 1.0e-5
+            or abs(output_float(replacement_command, "param6") - replacement_lon * 1e-7) > 1.0e-5
+        ):
+            raise AcceptanceFailure(
+                "moving cue supersession did not publish the replacement coordinate\n"
+                + replacement_command
+            )
+        original_command_timestamp = replacement_timestamp
+        record(
+            results,
+            "moving_cue_supersession_replaces_navigation",
+            supersede_started,
+            "fresh cue 759 durably aborted moving cue 736 and published one newer DO_REPOSITION to the replacement coordinate",
+        )
+
         px4.command("param set MAV_M_ACTION 0")
         time.sleep(0.3)
         if re.search(
@@ -1306,11 +1531,31 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             re.MULTILINE,
         ) is None:
             raise AcceptanceFailure("MAV_M_ACTION did not revoke future commands")
-        px4.command("mavlink task reject 736 53001")
+        stop_replacement_started = time.monotonic()
+        stop_replacement = make_cue(
+            endpoint,
+            760,
+            int(time.time() * 1_000_000),
+            "observe replacement",
+            cue_type=2,
+        )
+        endpoint.send_frozen(stop_replacement)
         assert_ack(
-            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 736),
-            dialect.MAVLINK_M_ACK_REJECTED,
-            "local operator aborted",
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 760),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending",
+        )
+        px4.command("mavlink task accept 760 53001")
+        wait_for_cue_ack_set(
+            endpoint,
+            {
+                759: (dialect.MAVLINK_M_ACK_REJECTED, "superseded"),
+                760: (dialect.MAVLINK_M_ACK_ACCEPTED, "previous cue superseded"),
+            },
+        )
+        px4.wait_target_status(
+            ["instance_id: 760", "state: 2", "command_flags: 0"],
+            3.0,
         )
         cancellation_command = px4.vehicle_command_status()
         cancellation_timestamp = re.search(
@@ -1324,13 +1569,132 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             or re.search(r"\bparam2:\s*1(?:\.0+)?\b", cancellation_command) is None
         ):
             raise AcceptanceFailure(
-                "revoking MAV_M_ACTION prevented safe reposition cancellation\n"
+                "moving-to-nonmoving supersession did not publish a hold\n"
                 + cancellation_command
             )
+        record(
+            results,
+            "moving_to_nonmoving_supersession_stops_navigation",
+            stop_replacement_started,
+            "Observe cue 760 rejected moving cue 759 before acceptance and published a newer hold even after MAV_M_ACTION was revoked",
+        )
+        px4.command("mavlink task reject 760 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 760),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator aborted",
+        )
 
         started = time.monotonic()
         px4.command("param set MAV_M_ACTION 2")
-        time.sleep(0.3)
+        px4.command("param set MAV_M_INT_DWL 60")
+        px4.command("param set GF_ACTION 2")
+        px4.command("param set GF_MAX_HOR_DIST 10000")
+        time.sleep(1.0)
+        restrictive_base_altitude = output_float(
+            px4.global_position_status(), "alt"
+        )
+        restrictive_cue = make_cue(
+            endpoint,
+            749,
+            int(time.time() * 1_000_000),
+            "fence blocked",
+            alt_msl=restrictive_base_altitude + 10.0,
+        )
+        endpoint.mav.send(restrictive_cue)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 749),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending pilot decision",
+        )
+        px4.command("mavlink task accept 749 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 749),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "local operator accepted active target",
+        )
+        px4.wait_target_status(
+            [
+                "instance_id: 749",
+                "state: 2",
+                "command_flags: 3",
+                "intercept_phase: 4",
+            ],
+            3.0,
+        )
+        px4.command("mavlink task reject 749 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 749),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator aborted active target",
+        )
+        record(
+            results,
+            "configured_restrictive_geofence_rejects_exact_intercept",
+            started,
+            "GF_ACTION=2 with a configured horizontal fence limit rejected the private exact fly-through and permanently aborted that acceptance",
+        )
+
+        started = time.monotonic()
+        px4.command("param set GF_MAX_HOR_DIST 0")
+        time.sleep(1.0)
+        no_fence_base_altitude = output_float(px4.global_position_status(), "alt")
+        no_fence_altitude = no_fence_base_altitude + 10.0
+        no_fence_cue = make_cue(
+            endpoint,
+            753,
+            int(time.time() * 1_000_000),
+            "no fence default",
+            alt_msl=no_fence_altitude,
+        )
+        endpoint.mav.send(no_fence_cue)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 753),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending pilot decision",
+        )
+        px4.command("mavlink task accept 753 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 753),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "local operator accepted active target",
+        )
+        no_fence_status = px4.wait_target_status(
+            ["instance_id: 753", "state: 2", "command_flags: 3"],
+            3.0,
+        )
+        if re.search(r"\bintercept_phase:\s*[12]\b", no_fence_status) is None:
+            raise AcceptanceFailure(
+                "default GF_ACTION=2 with no configured fence blocked intercept\n"
+                + no_fence_status
+            )
+        no_fence_command = px4.vehicle_command_status()
+        if (
+            re.search(r"\bcommand:\s*100001\b", no_fence_command) is None
+            or abs(output_float(no_fence_command, "param7") - no_fence_altitude) > 0.2
+        ):
+            raise AcceptanceFailure(
+                "default GF_ACTION=2 with no configured fence did not publish the exact fly-through\n"
+                + no_fence_command
+            )
+        px4.command("mavlink task reject 753 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 753),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator aborted active target",
+        )
+        record(
+            results,
+            "default_geofence_action_without_fence_allows_exact_intercept",
+            started,
+            "GF_ACTION=2 with zero polygon, circle, horizontal, and vertical constraints began the exact fly-through",
+        )
+
+        started = time.monotonic()
+        px4.command("param set MAV_M_ACTION 2")
+        px4.command("param set MAV_M_INT_DWL 60")
+        px4.command("param set GF_ACTION 1")
+        time.sleep(1.0)
         intercept_base_altitude = output_float(
             px4.global_position_status(), "alt"
         )
@@ -1354,20 +1718,52 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             dialect.MAVLINK_M_ACK_ACCEPTED,
             "local operator accepted active target",
         )
-        px4.wait_target_status(
-            ["instance_id: 746", "state: 2", "command_flags: 1"],
+        intercept_status = px4.wait_target_status(
+            ["instance_id: 746", "state: 2", "command_flags: 3"],
             3.0,
         )
+        if re.search(r"\bintercept_phase:\s*[12]\b", intercept_status) is None:
+            raise AcceptanceFailure(
+                "finite-altitude intercept did not enter approach transit/dwell\n"
+                + intercept_status
+            )
         intercept_command = px4.vehicle_command_status()
         commanded_intercept_altitude = output_float(intercept_command, "param7")
+        intercept_token_low = output_float(intercept_command, "param1")
+        intercept_token_high = output_float(intercept_command, "param2")
+        intercept_token = int(intercept_token_low) | (int(intercept_token_high) << 16)
+        first_intercept_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", intercept_command
+        )
         if (
-            re.search(r"\bcommand:\s*192\b", intercept_command) is None
+            re.search(r"\bcommand:\s*100001\b", intercept_command) is None
+            or first_intercept_timestamp is None
+            or intercept_token_low != int(intercept_token_low)
+            or intercept_token_high != int(intercept_token_high)
+            or intercept_token <= 0
+            or intercept_token > 0x7FFFFFFF
             or abs(commanded_intercept_altitude - intercept_altitude) > 0.2
         ):
             raise AcceptanceFailure(
-                "MAV_M_ACTION=2 finite-altitude intercept did not use cue AMSL "
-                f"(cue={intercept_altitude}, command={commanded_intercept_altitude})\n"
+                "MAV_M_ACTION=2 finite-altitude intercept did not begin an "
+                "internal cue-altitude fly-through "
+                f"(acceptance={intercept_base_altitude}, cue={intercept_altitude}, "
+                f"command={commanded_intercept_altitude})\n"
                 + intercept_command
+            )
+        time.sleep(0.75)
+        premature_command = px4.vehicle_command_status()
+        premature_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", premature_command
+        )
+        if (
+            premature_timestamp is None
+            or int(premature_timestamp.group(1))
+            != int(first_intercept_timestamp.group(1))
+        ):
+            raise AcceptanceFailure(
+                "finite-altitude intercept emitted a duplicate command before crossing\n"
+                + premature_command
             )
         px4.command("mavlink task reject 746 53001")
         assert_ack(
@@ -1375,11 +1771,123 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             dialect.MAVLINK_M_ACK_REJECTED,
             "local operator aborted active target",
         )
+        px4.command("param set MAV_M_INT_DWL 3")
         record(
             results,
-            "trusted_source_intercept_uses_finite_cue_altitude",
+            "trusted_source_intercept_starts_guarded_approach",
             started,
-            "local mode 2 used finite TARGET_CUE.alt only after explicit local acceptance",
+            "local mode 2 finite cue began one internal exact fly-through at cue altitude and emitted no duplicate command",
+        )
+
+        started = time.monotonic()
+        px4.command("param set MAV_M_INT_RAD 500")
+        px4.command("param set MAV_M_INT_DWL 0")
+        time.sleep(1.0)
+        arrival_position = px4.global_position_status()
+        arrival_lat = output_float(arrival_position, "lat")
+        arrival_lon = output_float(arrival_position, "lon")
+        arrival_altitude = output_float(arrival_position, "alt")
+        arrival_cue_altitude = arrival_altitude + 10.0
+        arrival_cue = make_cue(
+            endpoint,
+            748,
+            int(time.time() * 1_000_000),
+            "arrival completion",
+            lat=round(arrival_lat * 1e7),
+            lon=round(arrival_lon * 1e7),
+            alt_msl=arrival_cue_altitude,
+        )
+        endpoint.mav.send(arrival_cue)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 748),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending pilot decision",
+        )
+        px4.command("mavlink task accept 748 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 748),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "local operator accepted active target",
+        )
+        radius_independent_command = px4.vehicle_command_status()
+        radius_independent_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", radius_independent_command
+        )
+        if (
+            re.search(r"\bcommand:\s*100001\b", radius_independent_command) is None
+            or radius_independent_timestamp is None
+            or (
+                abs(output_float(radius_independent_command, "param1") - 500.0) < 0.001
+                and abs(output_float(radius_independent_command, "param2")) < 0.001
+            )
+        ):
+            raise AcceptanceFailure(
+                "MAV_M_INT_RAD leaked into exact target-hit acceptance\n"
+                + radius_independent_command
+            )
+        completion_status = px4.wait_target_status(
+            [
+                "instance_id: 748",
+                "state: 2",
+                "command_flags: 3",
+                "intercept_phase: 3",
+            ],
+            90.0,
+            keepalive=lambda: establish_udp_peer(endpoint),
+        )
+        completion_command = px4.vehicle_command_status()
+        commanded_completion_altitude = output_float(completion_command, "param7")
+        completion_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", completion_command
+        )
+        if (
+            re.search(r"\bcommand:\s*100001\b", completion_command) is None
+            or completion_timestamp is None
+            or int(completion_timestamp.group(1))
+            != int(radius_independent_timestamp.group(1))
+            or abs(commanded_completion_altitude - arrival_cue_altitude) > 0.2
+        ):
+            raise AcceptanceFailure(
+                "completion did not retain the one cue-altitude fly-through command "
+                f"(cue={arrival_cue_altitude}, command={commanded_completion_altitude})\n"
+                + completion_command
+                + completion_status
+            )
+        px4.command("param set MAV_M_ACTION 0")
+        aborted_completion_status = px4.wait_target_status(
+            ["instance_id: 748", "intercept_phase: 4"],
+            3.0,
+        )
+        stopped_completion_command = px4.vehicle_command_status()
+        stopped_completion_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", stopped_completion_command
+        )
+        if (
+            stopped_completion_timestamp is None
+            or int(stopped_completion_timestamp.group(1))
+            <= int(completion_timestamp.group(1))
+            or re.search(r"\bcommand:\s*192\b", stopped_completion_command) is None
+        ):
+            raise AcceptanceFailure(
+                "changing MAV_M_ACTION did not permanently abort and stop intercept loiter\n"
+                + stopped_completion_command
+                + aborted_completion_status
+            )
+        px4.command("mavlink task reject 748 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 748),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator aborted active target",
+        )
+        px4.command("param set MAV_M_ACTION 2")
+        px4.command("param set MAV_M_INT_RAD 25")
+        px4.command("param set MAV_M_INT_DWL 3")
+        time.sleep(1.0)
+        record(
+            results,
+            "trusted_source_intercept_completion",
+            started,
+            "guarded cue-altitude crossing and dwell latched COMPLETE without a second command; action change latched ABORTED and stopped it",
         )
 
         started = time.monotonic()
@@ -1405,10 +1913,15 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             dialect.MAVLINK_M_ACK_ACCEPTED,
             "local operator accepted active target",
         )
-        px4.wait_target_status(
+        nan_status = px4.wait_target_status(
             ["instance_id: 747", "state: 2", "command_flags: 1"],
             3.0,
         )
+        if "intercept_phase: 0" not in nan_status:
+            raise AcceptanceFailure(
+                "NaN-altitude action-2 cue unexpectedly entered two-phase intercept\n"
+                + nan_status
+            )
         level_command = px4.vehicle_command_status()
         commanded_nan_cue_altitude = output_float(level_command, "param7")
         if (
@@ -1426,8 +1939,6 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             dialect.MAVLINK_M_ACK_REJECTED,
             "local operator aborted active target",
         )
-        px4.command("param set MAV_M_ACTION 0")
-        time.sleep(0.3)
         record(
             results,
             "trusted_source_intercept_nan_altitude_stays_level",
@@ -1435,8 +1946,318 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             "local mode 2 treated NaN TARGET_CUE.alt as a level transit at acceptance-time aircraft AMSL",
         )
 
+        owner_effect_endpoint, owner_effect_transport = connect_owner_endpoint(
+            dialect, signed
+        )
+        try:
+            started = time.monotonic()
+            owner_nan_cue = make_cue(
+                endpoint,
+                755,
+                int(time.time() * 1_000_000),
+                "owner no altitude",
+                alt_msl=math.nan,
+            )
+            endpoint.mav.send(owner_nan_cue)
+            assert_ack(
+                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 755),
+                dialect.MAVLINK_M_ACK_RECEIVED,
+                "stored pending pilot decision",
+            )
+            owner_nan_snapshot = wait_for_owner_snapshot(
+                owner_effect_endpoint, 755, "AAGS_PEND"
+            )
+            if (
+                owner_nan_snapshot["configuration"] != 513
+                or not math.isnan(float(owner_nan_snapshot["alt"]))
+            ):
+                raise AcceptanceFailure(
+                    "owner NaN cue snapshot did not expose action ceiling 2 "
+                    f"and unknown altitude: {owner_nan_snapshot!r}"
+                )
+            send_owner_decision(
+                owner_effect_endpoint, 755, True, requested_effect=2
+            )
+            wait_for_command_ack(
+                owner_effect_endpoint, dialect.MAV_RESULT_DENIED
+            )
+            px4.wait_target_status(
+                [
+                    "instance_id: 755",
+                    "state: 1",
+                    "action_mode: 2",
+                    "command_flags: 0",
+                    "prompt: True",
+                ],
+                3.0,
+            )
+            expect_no_ack(
+                endpoint,
+                dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                755,
+                timeout=0.75,
+            )
+            send_owner_decision(owner_effect_endpoint, 755, False)
+            wait_for_command_ack(
+                owner_effect_endpoint, dialect.MAV_RESULT_ACCEPTED
+            )
+            assert_ack(
+                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 755),
+                dialect.MAVLINK_M_ACK_REJECTED,
+                "local operator rejected",
+            )
+            record(
+                results,
+                "owner_explicit_intercept_requires_altitude",
+                started,
+                "owner effect 2 was denied for the exact NaN-altitude cue; it stayed Pending until explicit owner rejection",
+            )
+
+            started = time.monotonic()
+            owner_level_position = px4.global_position_status()
+            owner_level_altitude = output_float(owner_level_position, "alt")
+            owner_level_lat = (
+                round(output_float(owner_level_position, "lat") * 1e7) + 5_000
+            )
+            owner_level_lon = round(
+                output_float(owner_level_position, "lon") * 1e7
+            )
+            owner_level_cue_altitude = owner_level_altitude + 12.5
+            owner_level_cue = make_cue(
+                endpoint,
+                756,
+                int(time.time() * 1_000_000),
+                "owner level travel",
+                lat=owner_level_lat,
+                lon=owner_level_lon,
+                alt_msl=owner_level_cue_altitude,
+            )
+            endpoint.mav.send(owner_level_cue)
+            assert_ack(
+                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 756),
+                dialect.MAVLINK_M_ACK_RECEIVED,
+                "stored pending pilot decision",
+            )
+            wait_for_owner_snapshot(owner_effect_endpoint, 756, "AAGS_PEND")
+            send_owner_decision(
+                owner_effect_endpoint, 756, True, requested_effect=1
+            )
+            wait_for_command_ack(
+                owner_effect_endpoint, dialect.MAV_RESULT_ACCEPTED
+            )
+            assert_ack(
+                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 756),
+                dialect.MAVLINK_M_ACK_ACCEPTED,
+                "local operator accepted active target",
+            )
+            owner_level_status = px4.wait_target_status(
+                [
+                    "instance_id: 756",
+                    "state: 2",
+                    "action_mode: 1",
+                    "command_flags: 1",
+                    "intercept_phase: 0",
+                ],
+                3.0,
+            )
+            owner_level_command = px4.vehicle_command_status()
+            commanded_owner_level_altitude = output_float(
+                owner_level_command, "param7"
+            )
+            if (
+                re.search(r"\bcommand:\s*192\b", owner_level_command) is None
+                or abs(commanded_owner_level_altitude - owner_level_altitude)
+                > 5.0
+                or abs(
+                    commanded_owner_level_altitude - owner_level_cue_altitude
+                )
+                < 1.0
+            ):
+                raise AcceptanceFailure(
+                    "owner effect 1 under MAV_M_ACTION=2 did not remain level "
+                    f"(before={owner_level_altitude}, cue={owner_level_cue_altitude}, "
+                    f"command={commanded_owner_level_altitude})\n"
+                    + owner_level_command
+                    + owner_level_status
+                )
+            send_owner_decision(owner_effect_endpoint, 756, False)
+            wait_for_command_ack(
+                owner_effect_endpoint, dialect.MAV_RESULT_ACCEPTED
+            )
+            assert_ack(
+                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 756),
+                dialect.MAVLINK_M_ACK_REJECTED,
+                "local operator aborted",
+            )
+            record(
+                results,
+                "owner_explicit_level_under_intercept_ceiling",
+                started,
+                "owner effect 1 with MAV_M_ACTION=2 emitted a level DO_REPOSITION, ignored finite cue altitude, and reported action_mode 1",
+            )
+
+            started = time.monotonic()
+            px4.command("param set MAV_M_INT_RAD 500")
+            px4.command("param set MAV_M_INT_DWL 4")
+            time.sleep(1.0)
+            owner_intercept_position = px4.global_position_status()
+            owner_intercept_lat = output_float(owner_intercept_position, "lat")
+            owner_intercept_lon = output_float(owner_intercept_position, "lon")
+            owner_intercept_altitude = output_float(
+                owner_intercept_position, "alt"
+            )
+            owner_intercept_cue_altitude = owner_intercept_altitude + 10.0
+            owner_intercept_cue = make_cue(
+                endpoint,
+                757,
+                int(time.time() * 1_000_000),
+                "owner intercept",
+                lat=round(owner_intercept_lat * 1e7),
+                lon=round(owner_intercept_lon * 1e7),
+                alt_msl=owner_intercept_cue_altitude,
+            )
+            endpoint.mav.send(owner_intercept_cue)
+            assert_ack(
+                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 757),
+                dialect.MAVLINK_M_ACK_RECEIVED,
+                "stored pending pilot decision",
+            )
+            wait_for_owner_snapshot(owner_effect_endpoint, 757, "AAGS_PEND")
+            send_owner_decision(
+                owner_effect_endpoint, 757, True, requested_effect=2
+            )
+            wait_for_command_ack(
+                owner_effect_endpoint, dialect.MAV_RESULT_ACCEPTED
+            )
+            assert_ack(
+                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 757),
+                dialect.MAVLINK_M_ACK_ACCEPTED,
+                "local operator accepted active target",
+            )
+            owner_intercept_initial_status = px4.wait_target_status(
+                [
+                    "instance_id: 757",
+                    "state: 2",
+                    "action_mode: 2",
+                    "command_flags: 3",
+                ],
+                3.0,
+            )
+            if re.search(
+                r"\bintercept_phase:\s*[12]\b",
+                owner_intercept_initial_status,
+            ) is None:
+                raise AcceptanceFailure(
+                    "owner effect 2 did not enter intercept transit or dwell\n"
+                    + owner_intercept_initial_status
+                )
+            owner_intercept_initial_command = px4.vehicle_command_status()
+            commanded_owner_intercept_level = output_float(
+                owner_intercept_initial_command, "param7"
+            )
+            owner_token_low = output_float(owner_intercept_initial_command, "param1")
+            owner_token_high = output_float(owner_intercept_initial_command, "param2")
+            owner_token = int(owner_token_low) | (int(owner_token_high) << 16)
+            owner_intercept_initial_timestamp = re.search(
+                r"\btimestamp:\s*(\d+)\b", owner_intercept_initial_command
+            )
+            if (
+                re.search(
+                    r"\bcommand:\s*100001\b", owner_intercept_initial_command
+                )
+                is None
+                or owner_token_low != int(owner_token_low)
+                or owner_token_high != int(owner_token_high)
+                or owner_token <= 0
+                or owner_token > 0x7FFFFFFF
+                or owner_intercept_initial_timestamp is None
+                or (abs(owner_token_low - 500.0) < 0.001 and owner_token_high == 0.0)
+                or abs(
+                    commanded_owner_intercept_level
+                    - owner_intercept_cue_altitude
+                )
+                > 0.2
+            ):
+                raise AcceptanceFailure(
+                    "owner effect 2 did not begin one cue-altitude approach\n"
+                    + owner_intercept_initial_command
+                )
+            owner_intercept_completion_status = px4.wait_target_status(
+                [
+                    "instance_id: 757",
+                    "action_mode: 2",
+                    "command_flags: 3",
+                    "intercept_phase: 3",
+                ],
+                90.0,
+                keepalive=lambda: establish_udp_peer(endpoint),
+            )
+            owner_intercept_completion_command = px4.vehicle_command_status()
+            commanded_owner_intercept_cue_altitude = output_float(
+                owner_intercept_completion_command, "param7"
+            )
+            owner_intercept_completion_timestamp = re.search(
+                r"\btimestamp:\s*(\d+)\b", owner_intercept_completion_command
+            )
+            if (
+                re.search(
+                    r"\bcommand:\s*100001\b", owner_intercept_completion_command
+                )
+                is None
+                or owner_intercept_completion_timestamp is None
+                or int(owner_intercept_completion_timestamp.group(1))
+                != int(owner_intercept_initial_timestamp.group(1))
+                or abs(
+                    commanded_owner_intercept_cue_altitude
+                    - owner_intercept_cue_altitude
+                )
+                > 0.2
+            ):
+                raise AcceptanceFailure(
+                    "owner effect 2 did not complete without a second command\n"
+                    + owner_intercept_completion_command
+                    + owner_intercept_completion_status
+                )
+            send_owner_decision(owner_effect_endpoint, 757, False)
+            wait_for_command_ack(
+                owner_effect_endpoint, dialect.MAV_RESULT_ACCEPTED
+            )
+            try:
+                owner_abort_ack = wait_for_ack(
+                    endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 757
+                )
+                owner_abort_reason = "local operator aborted active target"
+
+            except AcceptanceFailure:
+                # MAVLink UDP is lossy. Replay the immutable cue after the
+                # committed abort and require its terminal idempotent ACK.
+                endpoint.mav.send(owner_intercept_cue)
+                owner_abort_ack = wait_for_ack(
+                    endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 757
+                )
+                owner_abort_reason = "duplicate idempotent replay"
+
+            assert_ack(
+                owner_abort_ack,
+                dialect.MAVLINK_M_ACK_REJECTED,
+                owner_abort_reason,
+            )
+            px4.command("param set MAV_M_INT_RAD 25")
+            px4.command("param set MAV_M_INT_DWL 3")
+            record(
+                results,
+                "owner_explicit_intercept_guarded_approach",
+                started,
+                "owner effect 2 entered one guarded cue-altitude approach, proved the exact target crossing, dwelled, and reported complete without a second command",
+            )
+        finally:
+            owner_effect_transport.close()
+
+        px4.command("param set MAV_M_ACTION 0")
+        time.sleep(0.3)
+
         px4.command("commander land")
-        px4.wait_land_detected(["landed: True"], 30.0)
+        px4.wait_land_detected(["landed: True"], 90.0)
         px4.command("commander disarm")
         px4.wait_vehicle_status(["arming_state: 1"], 5.0)
         px4.command(f"param set MAV_M_MAX_AGE {max_age}")
@@ -1724,7 +2545,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         px4.command("param set MAV_M_SAME_EP 1")
         time.sleep(0.75)
         drain(endpoint)
-        local_cue_id = 760
+        local_cue_id = 764
         endpoint.mav.send(
             make_cue(
                 endpoint,
@@ -1784,6 +2605,215 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         time.sleep(0.75)
 
         started = time.monotonic()
+        px4.command("param set MAV_M_SRC_SYS -1")
+        px4.command("param set MAV_M_CTL_SYS -1")
+        time.sleep(0.75)
+        wildcard_parameters = px4.parameter_status("MAV_M_SRC_SYS") + px4.parameter_status("MAV_M_CTL_SYS")
+        for parameter in ("MAV_M_SRC_SYS", "MAV_M_CTL_SYS"):
+            if re.search(
+                rf"\b{parameter}\b[^\n]*:\s*-1\s*$",
+                wildcard_parameters,
+                re.MULTILINE,
+            ) is None:
+                raise AcceptanceFailure(
+                    f"{parameter} wildcard was not retained\n{wildcard_parameters}"
+                )
+
+        px4.command("param set MAV_M_ACTION 1")
+        px4.command("commander disarm")
+        px4.wait_vehicle_status(["arming_state: 1"], 5.0)
+        px4.command("commander takeoff")
+        px4.wait_vehicle_status(
+            ["arming_state: 2", "failsafe: False", "failure_detector_status: 0"],
+            8.0,
+        )
+        wildcard_airborne_fields = [
+            "freefall: False",
+            "ground_contact: False",
+            "maybe_landed: False",
+            "landed: False",
+        ]
+        px4.wait_land_detected(wildcard_airborne_fields, 20.0)
+        px4.wait_vehicle_status(
+            ["arming_state: 2", "nav_state: 4", "failsafe: False"],
+            20.0,
+        )
+
+        wildcard_source = Endpoint(
+            dialect,
+            transport,
+            WILDCARD_SOURCE_SYSTEM,
+            SOURCE_COMPONENT,
+            SIGNING_KEY if signed else None,
+            7,
+        )
+        wildcard_wrong_component = Endpoint(
+            dialect,
+            transport,
+            WILDCARD_SOURCE_SYSTEM,
+            SOURCE_COMPONENT + 1,
+            SIGNING_KEY if signed else None,
+            7,
+        )
+        wildcard_cue_id = 761
+        wildcard_cue = make_cue(
+            wildcard_source,
+            wildcard_cue_id,
+            int(time.time() * 1_000_000),
+            "wildcard source",
+        )
+        wildcard_source.send_frozen(wildcard_cue)
+        wildcard_received = wait_for_ack(
+            endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, wildcard_cue_id
+        )
+        assert_ack(
+            wildcard_received,
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending",
+            WILDCARD_SOURCE_SYSTEM,
+        )
+        if wildcard_received.origin_sysid != WILDCARD_SOURCE_SYSTEM:
+            raise AcceptanceFailure(
+                "wildcard cue ACK did not preserve its actual source system"
+            )
+
+        # A second allowed system may not reuse an in-flight cue ID because
+        # the owner-decision command has no source-system correlation field.
+        endpoint.mav.send(
+            make_cue(
+                endpoint,
+                wildcard_cue_id,
+                int(time.time() * 1_000_000),
+                "ambiguous source",
+                cue_type=2,
+            )
+        )
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, wildcard_cue_id),
+            dialect.MAVLINK_M_ACK_FAILED,
+            "ambiguous across sources",
+        )
+
+        wildcard_wrong_component.mav.send(
+            make_cue(
+                wildcard_wrong_component,
+                762,
+                int(time.time() * 1_000_000),
+                "wrong component",
+                cue_type=2,
+            )
+        )
+        expect_no_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 762)
+
+        wrong_route_transport = UdpTransport(
+            ("127.0.0.1", FORWARD_INGRESS_TEST_UDP_PORT),
+            ("127.0.0.1", FORWARD_INGRESS_PX4_UDP_PORT),
+        )
+        wrong_route_source = Endpoint(
+            dialect,
+            wrong_route_transport,
+            WILDCARD_SOURCE_SYSTEM,
+            SOURCE_COMPONENT,
+        )
+        try:
+            establish_udp_peer(wrong_route_source)
+            wrong_route_source.mav.send(
+                make_cue(
+                    wrong_route_source,
+                    763,
+                    int(time.time() * 1_000_000),
+                    "wrong route",
+                    cue_type=2,
+                )
+            )
+            expect_no_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 763)
+        finally:
+            wrong_route_transport.close()
+
+        wildcard_owner_transport = UdpTransport(
+            ("127.0.0.1", CONTROL_AAGS_UDP_PORT),
+            ("127.0.0.1", CONTROL_PX4_UDP_PORT),
+        )
+        wildcard_owner = Endpoint(
+            dialect,
+            wildcard_owner_transport,
+            WILDCARD_OWNER_SYSTEM,
+            OWNER_COMPONENT,
+            SIGNING_KEY if signed else None,
+            CONTROL_SIGNING_LINK_ID,
+        )
+        wrong_owner_component = Endpoint(
+            dialect,
+            wildcard_owner_transport,
+            WILDCARD_OWNER_SYSTEM,
+            OWNER_COMPONENT + 1,
+            SIGNING_KEY if signed else None,
+            CONTROL_SIGNING_LINK_ID,
+        )
+        wildcard_reject_owner = Endpoint(
+            dialect,
+            wildcard_owner_transport,
+            WILDCARD_REJECT_SYSTEM,
+            OWNER_COMPONENT,
+            SIGNING_KEY if signed else None,
+            CONTROL_SIGNING_LINK_ID,
+        )
+        try:
+            establish_udp_peer(wildcard_owner)
+            wait_for_owner_snapshot(wildcard_owner, wildcard_cue_id, "AAGS_PEND")
+            send_owner_decision(wrong_owner_component, wildcard_cue_id, True)
+            wait_for_command_ack(wildcard_owner, dialect.MAV_RESULT_DENIED)
+            send_owner_decision(wildcard_owner, wildcard_cue_id, True)
+            wait_for_command_ack(wildcard_owner, dialect.MAV_RESULT_ACCEPTED)
+            assert_ack(
+                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, wildcard_cue_id),
+                dialect.MAVLINK_M_ACK_ACCEPTED,
+                "local operator accepted",
+                WILDCARD_SOURCE_SYSTEM,
+            )
+            wait_for_owner_snapshot(wildcard_owner, wildcard_cue_id, "AAGS_ACTV")
+            px4.wait_target_status(
+                [
+                    f"instance_id: {wildcard_cue_id}",
+                    "state: 2",
+                    "command_flags: 1",
+                    f"source_system: {WILDCARD_SOURCE_SYSTEM}",
+                ],
+                3.0,
+            )
+            wildcard_command = px4.vehicle_command_status()
+            for pattern in (
+                r"\bcommand:\s*192\b",
+                rf"\bsource_system:\s*{WILDCARD_SOURCE_SYSTEM}\b",
+                rf"\bsource_component:\s*{SOURCE_COMPONENT}\b",
+            ):
+                if re.search(pattern, wildcard_command) is None:
+                    raise AcceptanceFailure(
+                        "wildcard-authorized movement did not preserve the actual source\n"
+                        + wildcard_command
+                    )
+            send_owner_decision(wildcard_reject_owner, wildcard_cue_id, False)
+            wait_for_command_ack(wildcard_owner, dialect.MAV_RESULT_ACCEPTED)
+            assert_ack(
+                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, wildcard_cue_id),
+                dialect.MAVLINK_M_ACK_REJECTED,
+                "local operator aborted",
+                WILDCARD_SOURCE_SYSTEM,
+            )
+        finally:
+            wildcard_owner_transport.close()
+
+        px4.command(f"param set MAV_M_SRC_SYS {SOURCE_SYSTEM}")
+        px4.command(f"param set MAV_M_CTL_SYS {OWNER_SYSTEM}")
+        time.sleep(0.75)
+        record(
+            results,
+            "system_wildcards_preserve_component_and_route",
+            started,
+            "system 253 published level movement on the cue route, systems 252 and 251 accepted and aborted it on the owner route, and wrong component, wrong route, and ambiguous cue ID failed closed",
+        )
+
+        started = time.monotonic()
         px4.command("param set MAV_M_MAX_AGE -1")
         time.sleep(0.3)
         corrected_age = px4.parameter_status("MAV_M_MAX_AGE")
@@ -1792,7 +2822,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
                 "negative MAV_M_MAX_AGE was not corrected to the safe default\n"
                 + corrected_age
             )
-        px4.set_invalid_endpoint_parameter("MAV_M_SRC_SYS", -1)
+        px4.set_invalid_endpoint_parameter("MAV_M_SRC_SYS", -2)
         endpoint.mav.send(
             make_cue(endpoint, 750, int(time.time() * 1_000_000), "bad sys")
         )
@@ -1816,7 +2846,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             results,
             "corrupt_parameter_aliases_fail_closed",
             started,
-            "negative age corrected; -1/446 source IDs and instance 6 could not modulo-alias a valid endpoint",
+            "negative age corrected; -2/446 source IDs and instance 6 could not modulo-alias a valid endpoint",
         )
 
         return {

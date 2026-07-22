@@ -9,9 +9,12 @@ Branch scope:
 - `v1.14-CAM-MAV-M` contains the production-oriented receiver, authority
   state machine, owner decisions, ACK behavior, action policy, safety gates,
   conformance sources, endpoint tool, and ARK v6X board enablement.
-- `v1.14-CAM-MAV-M-SITL` is based on this branch and adds the workstation
-  macOS, current-Clang, Gazebo Classic, dual-runner, and SITL board support.
-- Production hardware does not require the workstation compatibility changes.
+- `v1.14-CAM-MAV-M-SITL` is based on `v1.14-CAM-MAV-M` and adds the
+  workstation-specific macOS and current-Clang compatibility changes, Gazebo
+  Classic support, SITL board enablement, and the dual-instance validation
+  runner.
+- Production hardware should use `v1.14-CAM-MAV-M` unless these SITL and host
+  compatibility changes are specifically needed.
 
 Profile identity:
 
@@ -33,15 +36,17 @@ task-status messages are not part of this endpoint.
 
 ## Build
 
-The ARK v6X board configuration in this core branch opts into the `mavlink_m`
-dialect and receiver:
+The branch board configurations opt into the `mavlink_m` dialect and
+receiver. Build the target provided by the selected branch:
 
 ```sh
+PATH=/tmp/px4-aags-venv/bin:$PATH make px4_sitl_default
 PATH=/tmp/px4-aags-venv/bin:$PATH make ark_fmu-v6x_default
 ```
 
-Enable the same Kconfig option and dialect on each production board that needs
-direct AAGS vehicle cue support.
+The SITL target is supplied by `v1.14-CAM-MAV-M-SITL`. Enable the same Kconfig
+option and dialect on each additional production board that needs direct AAGS
+vehicle cue support.
 
 The endpoint is still disabled at runtime by default.
 
@@ -53,13 +58,13 @@ First identify the zero-based instance carrying the AAGS connection:
 mavlink status
 ```
 
-The optional `v1.14-CAM-MAV-M-SITL` branch supplies a dual-Gazebo runner. It
-uses each vehicle's stock instance `0` link for local AAGS cue and
-owner-control traffic (`MAV_M_SAME_EP=1`). It creates instance `4` later as
-telemetry-only visibility for the other AAGS; that observer route is
-intentionally not a cue endpoint. On any vehicle or launch topology, use the
-instance reported by `mavlink status`; do not infer `MAV_M_INST` from a UDP
-port or MAVLink channel number.
+The `v1.14-CAM-MAV-M-SITL` branch supplies a dual-Gazebo runner. It uses each
+vehicle's stock instance `0` link for local AAGS cue and owner-control traffic
+(`MAV_M_SAME_EP=1`). It creates instance `4` later as telemetry-only
+visibility for the other AAGS; that observer route is intentionally not a cue
+endpoint. On any vehicle or launch topology, use the instance reported by
+`mavlink status`; do not infer `MAV_M_INST` from a UDP port or MAVLink channel
+number.
 
 Then choose one of two exact endpoint layouts:
 
@@ -151,7 +156,7 @@ AAGS should show the outbound item as **Received**. On the owner AAGS, open
 **Contacts → TASKS → VEHICLE CUES**. PX4 publishes a receiver-local,
 cue-ID-correlated review snapshot only on `MAV_M_CTL_INST`. The card shows the
 source, exact latitude/longitude, stored MSL altitude, cue type, and current
-`MAV_M_ACTION` effect before Accept becomes available. A missing, stale, or
+`MAV_M_ACTION` permission before Accept becomes available. A missing, stale, or
 mismatched coordinate/policy snapshot disables Accept.
 
 For diagnostics, PX4 also exposes the pending item through:
@@ -167,8 +172,13 @@ named `AAGS_TGT` for an OSD integration.
 Select **ACCEPT VEHICLE CUE** or **REJECT** in that owner card. The UI request
 uses standard targeted `COMMAND_LONG/MAV_CMD_USER_1` as a receiver-local
 control channel; it does not add a task-control message to the finalized
-MAVLink-M dialect. `COMMAND_ACK` confirms only that PX4 queued the authorized
-local decision. The peer cue sender receives the authoritative
+MAVLink-M dialect. For Accept, command parameter 5 selects the effect for that
+exact cue: `0` uses the legacy default, `1` selects level travel, and `2`
+selects intercept. PX4 rejects an explicit selection above the locally
+configured `MAV_M_ACTION` permission ceiling or on a cue other than
+`INVESTIGATE`. Reject commands require parameter 5 to be `0`. `COMMAND_ACK`
+confirms only that PX4 queued the authorized local decision. The peer cue
+sender receives the authoritative
 `MAVLINK_M_ACK ACCEPTED/REJECTED` after durable state transition, while the
 owner card changes to ACTIVE. Both AAGS displays then show the aircraft
 red/flashing.
@@ -216,12 +226,12 @@ param set MAV_M_ACTION 1
 param save
 ```
 
-Value `1` samples the aircraft's current AMSL altitude at the acceptance
-instant and publishes a `VEHICLE_CMD_DO_REPOSITION` target at the cue
-latitude/longitude and that sampled altitude. In other words, PX4 creates an
-invisible destination waypoint level with the aircraft. It deliberately
-ignores `TARGET_CUE.alt`, so a ground target cannot make a normal transit
-descend toward terrain or climb.
+Value `1` permits level travel. It samples the aircraft's current AMSL altitude
+at the acceptance instant and publishes a `VEHICLE_CMD_DO_REPOSITION` target
+at the cue latitude/longitude and that sampled altitude. In other words, PX4
+creates an invisible destination waypoint level with the aircraft. It
+deliberately ignores `TARGET_CUE.alt`, so a ground target cannot make a normal
+transit descend toward terrain or climb.
 
 MAVLink-M has no `INTERCEPT` cue-type enum. The finalized values are
 `INVESTIGATE`, `OBSERVE`, and `MARK`; this implementation does not invent a
@@ -230,18 +240,81 @@ intercept navigation, configure the receiving aircraft locally:
 
 ```text
 param set MAV_M_ACTION 2
+param set MAV_M_INT_RAD 25
+param set MAV_M_INT_DWL 3
+param set MAV_M_INT_DZ 100
 param save
 ```
 
-Value `2` is a local trusted-source AAGS profile. An accepted `INVESTIGATE`
-cue with a finite `TARGET_CUE.alt` repositions to that AMSL altitude. A cue
-whose altitude is NaN still repositions at the aircraft's acceptance-time
-AMSL altitude. This is a receiver-wide policy for accepted `INVESTIGATE`
-cues, not a per-cue wire instruction: the finalized message has no field that
-distinguishes Level Reposition from Intercept. Select mode `1` on the receiving
-aircraft for level movement and mode `2` only when that aircraft is intentionally
-configured to use target altitude. Mode `1` never uses the cue altitude even if
-a sender includes one.
+Value `2` permits either level travel or intercept for each accepted cue. A
+finite-altitude `INVESTIGATE` cue accepted with effect `2` uses one guarded
+approach and exact crossing:
+
+1. PX4 sends a PX4-internal fly-through request to Navigator at the cue
+   latitude/longitude and `TARGET_CUE.alt`.
+2. For fixed wing, Navigator calculates the required horizontal slope distance
+   from the shallower limit imposed by `FW_P_LIM_MIN` or `FW_P_LIM_MAX` and
+   `FW_T_SINK_MAX` or `FW_T_CLMB_MAX`. The true-airspeed bound is twice
+   `FW_AIRSPD_MAX`. Navigator adds the horizontal wind magnitude and three
+   standard deviations from the north/east wind variances to obtain a
+   conservative ground-speed bound. It converts both pitch and vertical-rate
+   limits to ground-relative gradients, then applies a 0.8 margin. The wind
+   sample must be no more than 2 seconds old, both components and variances
+   must be finite, and both variances must be nonnegative. Missing or invalid
+   wind data rejects fixed-wing Intercept. A calculated approach longer than
+   100 km is also rejected. The aircraft flies level to the calculated
+   approach entry, then follows the bounded slope to the cue. If the cue is
+   too close for that slope, Navigator places the entry behind the aircraft on
+   the same inbound line. The aircraft first flies away level, turns, and then
+   approaches the cue. At the entry, fixed wing remains on the level leg until
+   fresh valid horizontal ground velocity is at least 3 m/s and aligned within
+   60 degrees of the entry-to-target vector. An outbound pass cannot promote
+   the slope. A cue at the current coordinate uses current heading to construct
+   the entry. Multicopters fly directly to the cue coordinate and altitude.
+3. Fixed-wing altitude interpolation is anchored to the exact target plane for
+   this private setpoint. It does not finish at the ordinary waypoint
+   acceptance radius. Navigator accepts the first crossing only when both the
+   horizontal and vertical misses are no more than 5 m. A PX4-local,
+   token-matched Navigator ACK proves which exact request completed.
+4. After crossing, the aircraft enters a target-centered loiter at cue
+   altitude. After it remains continuously inside the effective arrival radius
+   for `MAV_M_INT_DWL`, PX4 reports the intercept as complete. It does not send
+   a second altitude reposition.
+
+`MAV_M_INT_RAD` is only the configured post-crossing dwell radius. It never
+changes the fixed 5 m horizontal and vertical fly-through hit tests. For fixed wing, the
+effective post-crossing dwell radius is
+`max(MAV_M_INT_RAD, abs(NAV_LOITER_RAD) + 10 m)` so an aircraft established on
+its commanded loiter circle can satisfy the dwell. Multicopters use
+`MAV_M_INT_RAD`. Leaving the radius resets the complete dwell. The mandatory
+target-plane crossing and matching internal completion ACK are separate from
+this radius and always occur first. The request token remains inside PX4 and
+the private command and ACK are not emitted on MAVLink.
+
+If the first bounded crossing misses, Navigator still establishes the planned
+target-centered loiter so the aircraft remains near the cue, but it holds the
+interpolated crossing altitude or current aircraft AMSL if interpolation is
+unavailable. It clears the exact-altitude flag and never continues descending
+toward cue altitude after a failed crossing. PX4 reports the intercept as
+`ABORTED`, records the miss, and permanently blocks completion for that
+acceptance. The operator must abort it and accept a fresh cue before another
+attempt. A safety, policy, source, or setpoint failure instead cancels the
+private navigation request and commands a hold at the aircraft's current
+position.
+`MAV_M_INT_DZ` is the maximum
+permitted absolute difference between acceptance altitude and cue altitude.
+A larger difference prevents that intercept.
+
+Explicit effect `2` requires a finite cue altitude and is denied when the
+altitude is NaN. The effect selection belongs to the receiver-local acceptance
+command, not `TARGET_CUE`: the finalized message has no field that
+distinguishes level travel from intercept. Set `MAV_M_ACTION=1` to permit only
+level movement. Set it to `2` only when that aircraft is authorized to let the
+local operator choose either level travel or intercept. Effect `1` never uses
+the cue altitude even if a sender includes one. Effect `0` preserves
+compatibility by using the current `MAV_M_ACTION` value as the default for that
+acceptance. Under that legacy default, a NaN altitude with
+`MAV_M_ACTION=2` remains a one-phase level reposition.
 
 The sender must resolve altitude provenance before transmission because
 `TARGET_CUE` carries only one MSL altitude float, not an altitude-source enum.
@@ -250,13 +323,36 @@ otherwise the explicit `0 m AMSL` fallback, and finally NaN only when the
 altitude remains unknown. PX4 cannot distinguish those sources after receipt;
 it sees only the resulting finite value or NaN.
 
-Both navigation modes publish only after durable receipt and local acceptance,
-while the vehicle is already airborne, armed, and in Hold (`AUTO_LOITER`),
-with fresh aircraft global position and land-detector state showing no landed,
-maybe-landed, ground-contact, or freefall condition, and with no active
-failsafe or failure-detector indication. If those conditions are not already
-true, acceptance and its ACK still succeed but no motion command is published.
-The check and command attempt happen once, at that explicit local acceptance.
+Both navigation modes publish movement only after durable receipt and local
+acceptance, while the vehicle is already airborne, armed, and in Hold
+(`AUTO_LOITER`), with fresh aircraft global position and land-detector state
+showing no landed, maybe-landed, ground-contact, or freefall condition, and
+with no active failsafe or failure-detector indication. If those conditions
+are not already true, acceptance and its ACK still succeed but no motion
+command is published.
+
+For a finite-altitude action-2 cue, PX4 continuously rechecks the exact active
+cue, expiry, source freshness, action and intercept parameters, armed
+airborne-Hold state, failsafe/failure state, global position, vertical limit,
+and ownership of the level-entry and exact-target setpoints. While the level
+entry is active, Loiter revalidates both that endpoint and the target on every
+cycle. PX4 1.14 cannot prove that the whole fixed-wing approach corridor stays
+inside a restrictive geofence, so exact Intercept is rejected whenever an
+actual polygon, circle, `GF_MAX_HOR_DIST`, or `GF_MAX_VER_DIST` restriction is
+configured and `GF_ACTION` is `LOITER`, `RTL`, `TERMINATE`, or `LAND`.
+PX4's default `GF_ACTION=LOITER` does not create a fence by itself and does not
+block Intercept when all four restrictions are absent. `NONE` and `WARN` allow
+Intercept with a configured fence. After crossing PX4 requires ownership of
+the promoted target-centered loiter. Task abort or expiry, mode exit, disarm, failsafe,
+source staleness, setpoint override, action or intercept-policy change, or
+restart permanently changes that acceptance to intercept phase `ABORTED`.
+Restoring a gate does not resume the dwell. Restarted active assignments remain
+visible for audit but never resume the intercept.
+
+`listener mavlink_m_target_status` reports `intercept_phase` as `NONE`,
+`TRANSIT`, `DWELL`, `COMPLETE`, or `ABORTED`. The owner link sends
+the same numeric value as `NAMED_VALUE_INT AAGS_IPHS`.
+
 An accepted cue does not begin moving later after arming, takeoff, entering
 Hold, or restart/restore. If another cue is already active, an acceptance
 attempt leaves the new cue Pending/Received and returns no false `ACCEPTED`
@@ -266,7 +362,9 @@ restored as Pending for the same reason.
 
 PX4 1.14 Commander requires the
 `MAV_DO_REPOSITION_FLAGS_CHANGE_MODE` bit (`param2=1`) to acknowledge
-`DO_REPOSITION`. The MAVLink-M flight-state gate already requires fresh
+the level Travel command.
+The private fly-through command is internal to PX4 and cannot be serialized as
+MAVLink `COMMAND_LONG`. The MAVLink-M flight-state gate already requires fresh
 `AUTO_LOITER`, so this reasserts the current Hold intention rather than
 selecting a different flight mode. Neither navigation mode arms, controls a
 payload, authorizes engagement, or converts a handover/OBSERVE/MARK cue into
@@ -368,8 +466,8 @@ reboot
 
 ## Verification
 
-The conformance source is portable. The command below uses the optional SITL
-branch or another configured host test build:
+The conformance source is portable. The command below uses the SITL branch or
+another configured host test build:
 
 ```sh
 PATH=/tmp/px4-aags-venv/bin:$PATH \

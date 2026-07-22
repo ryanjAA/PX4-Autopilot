@@ -1427,6 +1427,7 @@ Commander::handle_command(const vehicle_command_s &cmd)
 	case vehicle_command_s::VEHICLE_CMD_REQUEST_MESSAGE:
 	case vehicle_command_s::VEHICLE_CMD_DO_WINCH:
 	case vehicle_command_s::VEHICLE_CMD_DO_GRIPPER:
+	case vehicle_command_s::VEHICLE_CMD_PX4_MAVLINK_M_FLY_THROUGH:
 		/* ignore commands that are handled by other parts of the system */
 		break;
 
