@@ -1,0 +1,21 @@
+diff --git a/src/mavlink_interface.cpp b/src/mavlink_interface.cpp
+index 43bab08..625e188 100644
+--- a/src/mavlink_interface.cpp
++++ b/src/mavlink_interface.cpp
+@@ -416,9 +416,13 @@ void MavlinkInterface::pollForMAVLinkMessages()
+ 
+         // client closed the connection orderly, only makes sense on tcp
+         if (use_tcp_ && ret == 0) {
+-          std::cerr << "Connection closed by client." << "\n";
+-          close_conn_ = true;
+-          continue;
++          // Release the accepted socket immediately so the listening socket
++          // can accept a restarted SITL process, including one on another
++          // host. Leaving close_conn_ set strands the next TCP connection in
++          // the listen queue and that client receives no simulator frames.
++          this->close();
++          close_conn_ = false;
++          return;
+         }
+ 
+         // data received

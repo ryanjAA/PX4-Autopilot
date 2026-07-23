@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 COMMON_PATCH="$SCRIPT_DIR/px4_1_14_macos_sitl.patch"
 ARUCO_PATCH="$SCRIPT_DIR/px4_1_14_gazebo_aruco.patch"
+TCP_RECONNECT_PATCH="$SCRIPT_DIR/px4_1_14_gazebo_tcp_reconnect.patch"
 GIMBAL_PATCH="$SCRIPT_DIR/px4_1_14_mavlink_gimbal_extensions.patch"
 
 ROOT="$PWD"
@@ -145,7 +146,7 @@ ROOT="$(cd "$ROOT" && pwd)"
 grep -Eq '<version>1\.14([.<-]|</version>)' "$ROOT/package.xml" ||
 	die "the checkout does not identify itself as PX4 1.14"
 
-for resource in "$COMMON_PATCH" "$ARUCO_PATCH" "$GIMBAL_PATCH"; do
+for resource in "$COMMON_PATCH" "$ARUCO_PATCH" "$TCP_RECONNECT_PATCH" "$GIMBAL_PATCH"; do
 	[[ -f "$resource" ]] || die "missing companion file: $resource"
 done
 
@@ -381,6 +382,7 @@ if ((SKIP_PATCHES == 0)); then
 	copy_gazebo_source_if_needed
 	GAZEBO_ROOT="$ROOT/Tools/simulation/gazebo-classic/sitl_gazebo-classic"
 	apply_patch_set "$ARUCO_PATCH" "$GAZEBO_ROOT" "gazebo" "Gazebo OpenCV/Aruco compatibility"
+	apply_patch_set "$TCP_RECONNECT_PATCH" "$GAZEBO_ROOT" "gazebo-tcp" "Gazebo TCP reconnect compatibility"
 else
 	GAZEBO_ROOT="$ROOT/Tools/simulation/gazebo-classic/sitl_gazebo-classic"
 	[[ -f "$GAZEBO_ROOT/CMakeLists.txt" ]] || die "Gazebo Classic source is not populated"
