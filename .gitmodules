@@ -103,3 +103,6 @@
 [submodule "src/drivers/ins/sbgecom/sbgECom"]
 	path = src/drivers/ins/sbgecom/sbgECom
 	url = https://github.com/PX4/sbgECom.git
+[submodule "src/modules/mavlink/mavlink_m_generator"]
+	path = src/modules/mavlink/mavlink_m_generator
+	url = https://github.com/ardupilot/pymavlink.git

@@ -11,6 +11,18 @@ depends on MODULES_MAVLINK
 	---help---
 		Select the Mavlink dialect to generate and use.
 
+config MAVLINK_M_PRIVATE_PROFILE
+	bool "Dronecode MAVLink-M cue endpoint"
+	default n
+	depends on MODULES_MAVLINK
+	---help---
+		Compile the finalized Dronecode MAVLink-M cue and handover endpoint.
+		The board must also select the mavlink_m dialect. Runtime operation
+		remains fail-closed until MAV_M_MODE is explicitly enabled. Optional
+		non-kinetic reposition authority remains disabled until MAV_M_ACTION
+		is set to 1 for level transit or 2 for cue-altitude intercept, and a
+		cue is locally accepted.
+
 menuconfig MAVLINK_UAVCAN_PARAMETERS
 depends on MODULES_MAVLINK && DRIVERS_UAVCAN
         bool "Mavlink UAVCAN parameter support"

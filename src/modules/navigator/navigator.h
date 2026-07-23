@@ -87,6 +87,7 @@
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_roi.h>
 #include <uORB/topics/vehicle_status.h>
+#include <uORB/topics/wind.h>
 #include <uORB/topics/mode_completed.h>
 #include <uORB/uORB.h>
 
@@ -100,6 +101,8 @@ using namespace time_literals;
 class Navigator : public ModuleBase<Navigator>, public ModuleParams
 {
 public:
+	static constexpr float MavlinkMHitRadiusM{5.f};
+
 	Navigator();
 	~Navigator() override;
 
@@ -181,6 +184,13 @@ public:
 
 	float get_default_loiter_rad() { return fabsf(_param_nav_loiter_rad.get()); }
 	bool get_default_loiter_CCW() { return _param_nav_loiter_rad.get() < -FLT_EPSILON; }
+	float get_fw_pitch_limit_min() const { return _param_fw_p_lim_min.get(); }
+	float get_fw_pitch_limit_max() const { return _param_fw_p_lim_max.get(); }
+	float get_fw_max_sink_rate() const { return _param_fw_t_sink_max.get(); }
+	float get_fw_max_climb_rate() const { return _param_fw_t_clmb_max.get(); }
+	float get_fw_max_airspeed() const { return _param_fw_airspd_max.get(); }
+	bool mavlink_m_fly_through_allowed(double lat, double lon, float alt, float minimum_clearance_m);
+	void publish_mavlink_m_fly_through_ack(uint32_t token, uint8_t result, uint8_t result_param1 = 0);
 
 	/**
 	 * Returns the default acceptance radius defined by the parameter
@@ -309,6 +319,7 @@ private:
 	int _vehicle_status_sub{-1};
 
 	uORB::SubscriptionData<position_controller_status_s>	_position_controller_status_sub{ORB_ID(position_controller_status)};
+	uORB::SubscriptionData<wind_s>				_wind_sub{ORB_ID(wind)};
 
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
@@ -416,7 +427,8 @@ private:
 
 	void publish_navigator_status();
 
-	void publish_vehicle_command_ack(const vehicle_command_s &cmd, uint8_t result);
+	void publish_vehicle_command_ack(const vehicle_command_s &cmd, uint8_t result,
+					 uint8_t result_param1 = 0, int32_t result_param2 = 0);
 
 	void publish_distance_sensor_mode_request();
 
@@ -437,6 +449,14 @@ private:
 		(ParamFloat<px4::params::NAV_MIN_LTR_ALT>)   _param_min_ltr_alt,	/**< minimum altitude in Loiter mode*/
 		(ParamFloat<px4::params::NAV_MIN_GND_DIST>)
 		_param_nav_min_gnd_dist,	/**< minimum distance to ground (Mission and RTL)*/
+
+		// Fixed-wing guarded MAVLink-M approach limits. These are the same
+		// airframe limits used by fixed-wing position control.
+		(ParamFloat<px4::params::FW_P_LIM_MIN>)     _param_fw_p_lim_min,
+		(ParamFloat<px4::params::FW_P_LIM_MAX>)     _param_fw_p_lim_max,
+		(ParamFloat<px4::params::FW_T_SINK_MAX>)    _param_fw_t_sink_max,
+		(ParamFloat<px4::params::FW_T_CLMB_MAX>)    _param_fw_t_clmb_max,
+		(ParamFloat<px4::params::FW_AIRSPD_MAX>)    _param_fw_airspd_max,
 
 		// non-navigator parameters: Mission (MIS_*)
 		(ParamFloat<px4::params::MIS_TAKEOFF_ALT>)    _param_mis_takeoff_alt,

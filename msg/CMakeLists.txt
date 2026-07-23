@@ -133,6 +133,8 @@ set(msg_files
 	MagWorkerData.msg
 	ManualControlSwitches.msg
 	MavlinkLog.msg
+	MavlinkMTargetStatus.msg
+	MavlinkMTaskDecision.msg
 	MavlinkTunnel.msg
 	MessageFormatRequest.msg
 	MessageFormatResponse.msg

@@ -720,7 +720,8 @@ FixedWingModeManager::handle_setpoint_type(const position_setpoint_s &pos_sp_cur
 		// Achieve position setpoint altitude via loiter when laterally close to WP.
 		// Detect if system has switchted into a Loiter before (check _position_sp_type), and in that
 		// case remove the dist_xy check (not switch out of Loiter until altitude is reached).
-		if ((!_vehicle_status.in_transition_mode) && (dist >= 0.f)
+		if (!pos_sp_curr.mavlink_m_exact_altitude
+		    && (!_vehicle_status.in_transition_mode) && (dist >= 0.f)
 		    && (dist_z > acc_rad_z)
 		    && (dist_xy < acc_rad || _position_sp_type == position_setpoint_s::SETPOINT_TYPE_LOITER)) {
 
@@ -749,9 +750,11 @@ FixedWingModeManager::control_auto_position(const float control_interval, const 
 	   ) {
 		const float d_curr_prev = get_distance_to_next_waypoint(pos_sp_curr.lat, pos_sp_curr.lon, pos_sp_prev.lat,
 					  pos_sp_prev.lon);
+		const float altitude_completion_radius = pos_sp_curr.mavlink_m_exact_altitude
+				? 0.f : math::max(acc_rad, fabsf(pos_sp_curr.loiter_radius));
 
 		// Do not try to find a solution if the last waypoint is inside the acceptance radius of the current one
-		if (d_curr_prev > math::max(acc_rad, fabsf(pos_sp_curr.loiter_radius))) {
+		if (d_curr_prev > altitude_completion_radius) {
 			// Calculate distance to current waypoint
 			const float d_curr = get_distance_to_next_waypoint(pos_sp_curr.lat, pos_sp_curr.lon, _current_latitude,
 					     _current_longitude);
@@ -762,11 +765,11 @@ FixedWingModeManager::control_auto_position(const float control_interval, const 
 
 			// if the minimal distance is smaller than the acceptance radius, we should be at waypoint alt
 			// navigator will soon switch to the next waypoint item (if there is one) as soon as we reach this altitude
-			if (_min_current_sp_distance_xy > math::max(acc_rad, fabsf(pos_sp_curr.loiter_radius))) {
+			if (_min_current_sp_distance_xy > altitude_completion_radius) {
 				// The setpoint is set linearly and such that the system reaches the current altitude at the acceptance
 				// radius around the current waypoint
 				const float delta_alt = (pos_sp_curr.alt - pos_sp_prev.alt);
-				const float grad = -delta_alt / (d_curr_prev - math::max(acc_rad, fabsf(pos_sp_curr.loiter_radius)));
+				const float grad = -delta_alt / (d_curr_prev - altitude_completion_radius);
 				const float a = pos_sp_prev.alt - grad * d_curr_prev;
 
 				position_sp_alt = a + grad * _min_current_sp_distance_xy;
@@ -797,6 +800,11 @@ FixedWingModeManager::control_auto_position(const float control_interval, const 
 
 	_ctrl_configuration_handler.setThrottleMax(throttle_max);
 	_ctrl_configuration_handler.setThrottleMin(throttle_min);
+
+	if (pos_sp_curr.mavlink_m_exact_altitude) {
+		_ctrl_configuration_handler.setClimbRateTarget(_param_fw_t_clmb_max.get());
+		_ctrl_configuration_handler.setSinkRateTarget(_param_fw_t_sink_max.get());
+	}
 
 	Vector2f curr_pos_local{_local_pos.x, _local_pos.y};
 	Vector2f curr_wp_local = _global_local_proj_ref.project(pos_sp_curr.lat, pos_sp_curr.lon);

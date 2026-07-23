@@ -36,3 +36,8 @@ float32 alt_acceptance_radius # vertical acceptance radius, only used for fixed 
 float32 cruising_speed		# the generally desired cruising speed (not a hard constraint)
 bool gliding_enabled		# commands the vehicle to glide if the capability is available (fixed wing only)
 float32 cruising_throttle	# the generally desired cruising throttle (not a hard constraint), only has an effect for rover
+
+# Internal guarded MAVLink-M intercept waypoint. Fixed-wing position control
+# keeps the altitude first-order hold anchored to the exact coordinate and may
+# use the configured maximum climb or sink rate for this waypoint only.
+bool mavlink_m_exact_altitude
