@@ -25,7 +25,12 @@ FW_CONTROL = (ROOT / "src/modules/fw_pos_control/FixedwingPositionControl.cpp").
 POSITION_SETPOINT = (ROOT / "msg/PositionSetpoint.msg").read_text()
 COMMANDER = (ROOT / "src/modules/commander/Commander.cpp").read_text()
 MAVLINK_MAIN = (ROOT / "src/modules/mavlink/mavlink_main.cpp").read_text()
+MAVLINK_HEADER = (ROOT / "src/modules/mavlink/mavlink_main.h").read_text()
 SITL_RUNNER = (ROOT / "Tools/aags_mavlink_m/run_sitl_acceptance.py").read_text()
+DUAL_RUNNER_PATH = ROOT / "Tools/aags_mavlink_m/run_dual_gazebo.sh"
+DUAL_RUNNER = DUAL_RUNNER_PATH.read_text() if DUAL_RUNNER_PATH.exists() else ""
+ENDPOINT_TOOL = (ROOT / "Tools/aags_mavlink_m/endpoint_tool.py").read_text()
+MAVLINK_TIMESYNC = (ROOT / "src/modules/mavlink/mavlink_timesync.cpp").read_text()
 
 
 class Phase(IntEnum):
@@ -183,6 +188,36 @@ def restrictive_geofence_blocks_intercept(
 
 def effective_radius(configured_m: float, fixed_wing: bool, loiter_m: float) -> float:
     return max(configured_m, abs(loiter_m) + 10.0) if fixed_wing else configured_m
+
+
+def terrain_clearance_allowed(
+    minimum_m: float,
+    *,
+    terrain_fresh: bool,
+    hagl_fresh: bool,
+    aircraft_alt_msl_m: float,
+    terrain_alt_msl_m: float,
+    hagl_m: float,
+    candidate_alt_msl_m: float,
+) -> bool:
+    if minimum_m == -1.0:
+        return True
+    values = (
+        minimum_m,
+        aircraft_alt_msl_m,
+        terrain_alt_msl_m,
+        hagl_m,
+        candidate_alt_msl_m,
+    )
+    return (
+        all(math.isfinite(value) for value in values)
+        and 0.0 <= minimum_m <= 1000.0
+        and terrain_fresh
+        and hagl_fresh
+        and aircraft_alt_msl_m - terrain_alt_msl_m >= minimum_m
+        and hagl_m >= minimum_m
+        and candidate_alt_msl_m - terrain_alt_msl_m >= minimum_m
+    )
 
 
 def interpolated_target_plane_miss(
@@ -490,9 +525,20 @@ class InterceptPolicyTest(unittest.TestCase):
         self.assertIn(
             "_source_last_seen[message.sysid] = hrt_absolute_time();", HANDLER
         )
-        self.assertIn("hrt_abstime _source_last_seen[UINT8_MAX + 1]{};", HEADER)
+        self.assertRegex(
+            HEADER,
+            r"hrt_abstime\s+_source_last_seen\[UINT8_MAX \+ 1\]\s*\{\};",
+        )
         self.assertIn("level_movement_requires_fresh_cue_source", SITL_RUNNER)
         self.assertIn("movement blocked: cue source is stale", SITL_RUNNER)
+        stale_fixture = re.search(
+            r"establish_udp_peer\(endpoint\)\s+"
+            r"stale_source_cue = make_cue\(\s*endpoint,\s*758,.*?"
+            r"endpoint\.send_frozen\(stale_source_cue\)",
+            SITL_RUNNER,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(stale_fixture)
 
     def test_accepting_pending_explicitly_supersedes_active(self) -> None:
         accept = re.search(
@@ -587,9 +633,9 @@ class InterceptPolicyTest(unittest.TestCase):
             "_active.last_ack_result == MAVLINK_M_ACK_RECEIVED",
             "_active.command_flags == 0",
             "assignment_requests_movement(_active)",
-            "retry.state = AssignmentState::Pending;",
-            "retry.last_ack_result = MAVLINK_M_ACK_RECEIVED;",
-            "*slot = retry;",
+            "_active.state = AssignmentState::Pending;",
+            "_active.last_ack_result = MAVLINK_M_ACK_RECEIVED;",
+            "*slot = _active;",
             "_active = Assignment{};",
             "recovered_uncommitted_movement",
         ):
@@ -635,6 +681,27 @@ class InterceptPolicyTest(unittest.TestCase):
         self.assertIn("expired.command_flags |= CommandStopPending;", expire.group(0))
         self.assertIn("_deferred_navigation_stop = *stop_marker;", expire.group(0))
 
+    def test_persistence_restore_avoids_redundant_large_stack_copies(self) -> None:
+        state_crc = re.search(
+            r"uint32_t MavlinkMHandler::state_crc.*?\n\}", HANDLER, re.DOTALL
+        )
+        self.assertIsNotNone(state_crc)
+        self.assertNotIn("PersistedState copy", state_crc.group(0))
+        for contract in (
+            "offsetof(PersistedState, crc)",
+            "const uint32_t zero_crc = 0;",
+            "crc32_signature(crc, sizeof(zero_crc)",
+            "sizeof(state) - suffix_offset",
+        ):
+            self.assertIn(contract, state_crc.group(0))
+
+        load_state = re.search(
+            r"bool MavlinkMHandler::load_state\(\).*?\n\}", HANDLER, re.DOTALL
+        )
+        self.assertIsNotNone(load_state)
+        self.assertNotIn("Assignment stale_navigation{};", load_state.group(0))
+        self.assertNotIn("Assignment retry = _active;", load_state.group(0))
+
     def test_endpoint_selector_change_stops_navigation_and_invalidates_state(self) -> None:
         update_parameters = re.search(
             r"void MavlinkMHandler::update_parameters.*?\n\}", HANDLER, re.DOTALL
@@ -676,11 +743,12 @@ class InterceptPolicyTest(unittest.TestCase):
         )
         mismatch_body = load_state.group(0)[mismatch:]
         for contract in (
-            "Assignment stale_navigation{};",
+            "Assignment *stale_navigation = nullptr;",
             "state.active.command_flags & CommandNav",
-            "stale_navigation.command_flags |= CommandStopPending;",
-            "_deferred_navigation_stop = stale_navigation;",
-            "remember_terminal(stale_navigation",
+            "state.active.command_flags |= CommandStopPending;",
+            "stale_navigation = &state.active;",
+            "_deferred_navigation_stop = *stale_navigation;",
+            "remember_terminal(*stale_navigation",
             "stale MAVLink-M navigation quarantine was not persisted",
         ):
             self.assertIn(contract, mismatch_body)
@@ -701,7 +769,8 @@ class InterceptPolicyTest(unittest.TestCase):
             "message.compid == static_cast<uint8_t>(_control_component)",
             "_mavlink->get_instance_id() == _instance",
             "_mavlink->get_instance_id() == _control_instance",
-            "(!signing_required() || _signing_ready)",
+            "(!signing_required() || signing_active())",
+            "bool MavlinkMHandler::ingress_locked() const",
             "assignment instance ambiguous across sources",
         ):
             self.assertIn(contract, HANDLER)
@@ -779,7 +848,8 @@ class InterceptPolicyTest(unittest.TestCase):
             "VEHICLE_CMD_PX4_MAVLINK_M_FLY_THROUGH > UINT16_MAX", HANDLER
         )
         self.assertIn(
-            "? publish_internal_fly_through(_active, target_alt, intercept_token)", HANDLER
+            "? publish_internal_fly_through(_active, target_alt, acceptance_alt",
+            HANDLER,
         )
         self.assertIn(
             ": publish_vehicle_command(_active, vehicle_command_s::VEHICLE_CMD_DO_REPOSITION",
@@ -800,16 +870,17 @@ class InterceptPolicyTest(unittest.TestCase):
         self.assertIn("previous_along < 0.f && current_along >= 0.f", LOITER)
         self.assertIn("const float alpha", LOITER)
         self.assertIn("horizontal_miss <= Navigator::MavlinkMHitRadiusM", LOITER)
-        self.assertIn("complete_fly_through(target_hit, crossing_alt);", LOITER)
+        self.assertIn("complete_fly_through(target_hit);", LOITER)
         self.assertIn(
             "VEHICLE_CMD_PX4_MAVLINK_M_FLY_THROUGH:", COMMANDER
         )
 
     def test_completion_requires_observed_fly_through_promotion(self) -> None:
         self.assertIn("intercept_transit_setpoint_matches", HANDLER)
+        self.assertIn("intercept_recovery_setpoint_matches", HANDLER)
         self.assertIn("intercept_loiter_setpoint_matches", HANDLER)
         self.assertIn(
-            "target_loiter_owned && _intercept_setpoint_seen", HANDLER
+            "recovery_loiter_owned && _intercept_setpoint_seen", HANDLER
         )
         self.assertIn(
             "token-matched completion ACK", HANDLER
@@ -845,7 +916,7 @@ class InterceptPolicyTest(unittest.TestCase):
         self.assertIn("VEHICLE_CMD_RESULT_ACCEPTED", LOITER)
         self.assertIn("VEHICLE_CMD_RESULT_FAILED", LOITER)
         self.assertIn("VEHICLE_CMD_RESULT_CANCELLED", LOITER)
-        self.assertIn("target_loiter_owned && _intercept_setpoint_seen", HANDLER)
+        self.assertIn("recovery_loiter_owned && _intercept_setpoint_seen", HANDLER)
         self.assertIn("if (_intercept_navigator_completed)", HANDLER)
         self.assertIn(
             "command_ack.command < vehicle_command_s::VEHICLE_CMD_PX4_INTERNAL_START",
@@ -863,8 +934,8 @@ class InterceptPolicyTest(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(miss_gate)
-        self.assertIn("target-centered loiter retained", miss_gate.group("body"))
-        self.assertNotIn(", true", miss_gate.group("body"))
+        self.assertIn("acceptance-altitude target loiter retained", miss_gate.group("body"))
+        self.assertIn("recovery_loiter_owned && recovery_altitude_reached", miss_gate.group("body"))
 
     def test_navigator_rechecks_state_age_and_geofence_fail_closed(self) -> None:
         for contract in (
@@ -914,10 +985,13 @@ class InterceptPolicyTest(unittest.TestCase):
         )
         self.assertIsNotNone(endpoint_policy)
         body = endpoint_policy.group(0)
-        self.assertEqual(body.count("mavlink_m_fly_through_allowed"), 2)
+        self.assertEqual(body.count("mavlink_m_fly_through_allowed"), 4)
         self.assertIn("_fly_through_target_lat", body)
         self.assertIn("_fly_through_approach_active", body)
         self.assertIn("_fly_through_approach_lat", body)
+        self.assertIn("_fly_through_recovery_lat", body)
+        self.assertIn("_fly_through_recovery_alt", body)
+        self.assertIn("_fly_through_minimum_clearance", body)
         self.assertGreaterEqual(LOITER.count("fly_through_endpoints_allowed()"), 3)
 
     def test_fixed_wing_approach_uses_airframe_limits_and_safe_entry(self) -> None:
@@ -952,10 +1026,9 @@ class InterceptPolicyTest(unittest.TestCase):
     def test_exact_altitude_path_does_not_finish_early(self) -> None:
         self.assertIn("bool mavlink_m_exact_altitude", POSITION_SETPOINT)
         self.assertIn("!pos_sp_curr.mavlink_m_exact_altitude", FW_CONTROL)
-        self.assertIn(
-            "pos_sp_curr.mavlink_m_exact_altitude\n"
-            "\t\t\t\t\t\t\t ? 0.f",
+        self.assertRegex(
             FW_CONTROL,
+            r"pos_sp_curr\.mavlink_m_exact_altitude\s*\?\s*0\.f",
         )
         self.assertIn("? _param_fw_t_sink_max.get()", FW_CONTROL)
         self.assertIn("? _param_fw_t_clmb_max.get()", FW_CONTROL)
@@ -971,20 +1044,21 @@ class InterceptPolicyTest(unittest.TestCase):
         self.assertIn("complete_fly_through(true);", degenerate_leg.group("body"))
         self.assertNotIn("complete_fly_through(target_hit);", degenerate_leg.group("body"))
 
-    def test_failed_crossing_holds_crossing_altitude_without_exact_descent(self) -> None:
+    def test_failed_crossing_recovers_to_acceptance_altitude(self) -> None:
         completion = re.search(
-            r"Loiter::complete_fly_through\(bool target_hit, float safe_loiter_altitude\)"
+            r"Loiter::complete_fly_through\(bool target_hit\)"
             r"(?P<body>.*?)\n\}",
             LOITER,
             re.DOTALL,
         )
         self.assertIsNotNone(completion)
         body = completion.group("body")
-        self.assertIn("if (!target_hit)", body)
-        self.assertIn("? safe_loiter_altitude : current_altitude", body)
-        self.assertIn("triplet->current.alt = hold_altitude;", body)
+        self.assertIn("triplet->current.alt = _fly_through_recovery_alt;", body)
+        self.assertIn("triplet->next = position_setpoint_s{};", body)
+        self.assertIn("fixed-wing path smoothing cannot", body)
+        self.assertIn("_fly_through_recovery_active = true;", body)
         self.assertIn("triplet->current.mavlink_m_exact_altitude = false;", body)
-        self.assertIn("complete_fly_through(target_hit, crossing_alt);", LOITER)
+        self.assertIn("complete_fly_through(target_hit);", LOITER)
 
     def test_intercept_has_no_second_reposition_command(self) -> None:
         update = re.search(
@@ -1004,6 +1078,8 @@ class InterceptPolicyTest(unittest.TestCase):
             "navigation policy changed",
             "restart requires fresh acceptance",
             "cue altitude exceeds MAV_M_INT_DZ",
+            "MAV_M_INT_CLR requires fresh terrain and HAGL",
+            "MAV_M_INT_CLR terrain clearance breached",
         )
         for gate in required:
             self.assertIn(gate, HANDLER)
@@ -1015,6 +1091,7 @@ class InterceptPolicyTest(unittest.TestCase):
             "MAV_M_INT_RAD": ("25.0f", "1", "500"),
             "MAV_M_INT_DWL": ("3.0f", "0", "60"),
             "MAV_M_INT_DZ": ("100.0f", "0", "1000"),
+            "MAV_M_INT_CLR": ("30.0f", "-1", "1000"),
         }
         for name, (default, minimum, maximum) in expected.items():
             block = re.search(
@@ -1030,6 +1107,12 @@ class InterceptPolicyTest(unittest.TestCase):
         self.assertIn('send_int("AAGS_IPHS"', HANDLER)
         self.assertIn('"intercept_phase"', SITL_RUNNER)
         self.assertIn("position_setpoint_triplet", HEADER)
+        self.assertIn('"param set MAV_M_INT_CLR -1"', SITL_RUNNER)
+        self.assertIn('"MAV_M_INT_CLR": -1', SITL_RUNNER)
+        self.assertIn(
+            "intercept_terrain_gate_requires_fresh_decision_after_override",
+            SITL_RUNNER,
+        )
 
     def test_owner_decision_binds_per_cue_effect_under_permission_ceiling(self) -> None:
         self.assertIn("uint8 EFFECT_DEFAULT = 0", DECISION)
@@ -1094,12 +1177,271 @@ class InterceptPolicyTest(unittest.TestCase):
         self.assertIn('px4.command("mavlink task accept 746 53001")', SITL_RUNNER)
         self.assertIn('px4.command("mavlink task accept 747 53001")', SITL_RUNNER)
 
+    def test_bench_endpoint_self_registers_before_direct_fleet_tasks(self) -> None:
+        advertise = ENDPOINT_TOOL[
+            ENDPOINT_TOOL.index("def advertise_gcs") :
+            ENDPOINT_TOOL.index("def print_message")
+        ]
+        for contract in (
+            "MAV_TYPE_GCS",
+            "MAV_AUTOPILOT_INVALID",
+            "time.sleep(registration_delay)",
+        ):
+            self.assertIn(contract, advertise)
+        dispatch_start = ENDPOINT_TOOL.index(
+            'if args.command in ("cue", "track", "handover")'
+        )
+        dispatch = ENDPOINT_TOOL[
+            dispatch_start : ENDPOINT_TOOL.index(
+                'if args.command == "cue"', dispatch_start
+            )
+        ]
+        self.assertIn(
+            "advertise_gcs(endpoint, args.peer_registration_delay)",
+            dispatch,
+        )
+        self.assertIn("advertise_gcs(endpoint, 0.0)", SITL_RUNNER)
+
+    def test_sitl_data_tree_precedes_px4_options(self) -> None:
+        self.assertRegex(
+            SITL_RUNNER,
+            r"str\(self\.binary\),\s*\"-i\"[\s\S]*?str\(self\.etc\)",
+        )
+        if DUAL_RUNNER:
+            self.assertRegex(
+                DUAL_RUNNER,
+                r'"\$command"\s+"\$PX4"\s+"\$BUILD/etc"\s+"\$instance"',
+            )
+
+    def test_esad_output_selection_never_uses_stale_parameter_cache(self) -> None:
+        self.assertIn(
+            "get_esad_arming_forwarding_instance() const;",
+            MAVLINK_HEADER,
+        )
+        getter = re.search(
+            r"int\s+Mavlink::get_esad_arming_forwarding_instance\(\) const"
+            r"(?P<body>.*?)\n\}",
+            MAVLINK_MAIN,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(getter)
+        body = getter.group("body")
+        self.assertIn("int32_t selected_instance = -2;", body)
+        self.assertIn(
+            "param_get(_param_mav_m_esad_i.handle(), &selected_instance)",
+            body,
+        )
+        self.assertIn("return selected_instance;", body)
+        self.assertNotIn("_param_mav_m_esad_i.get()", body)
+        self.assertIn('"self-output ESAD forwarding"', SITL_RUNNER)
+
+    def test_terrain_clearance_model_fails_closed_and_override_is_exact(self) -> None:
+        safe = dict(
+            terrain_fresh=True,
+            hagl_fresh=True,
+            aircraft_alt_msl_m=500.0,
+            terrain_alt_msl_m=450.0,
+            hagl_m=50.0,
+            candidate_alt_msl_m=485.0,
+        )
+        self.assertTrue(terrain_clearance_allowed(30.0, **safe))
+        self.assertFalse(
+            terrain_clearance_allowed(30.0, **{**safe, "terrain_fresh": False})
+        )
+        self.assertFalse(
+            terrain_clearance_allowed(30.0, **{**safe, "hagl_fresh": False})
+        )
+        self.assertFalse(
+            terrain_clearance_allowed(
+                30.0, **{**safe, "aircraft_alt_msl_m": 479.9}
+            )
+        )
+        self.assertFalse(
+            terrain_clearance_allowed(30.0, **{**safe, "hagl_m": 29.9})
+        )
+        self.assertFalse(
+            terrain_clearance_allowed(
+                30.0, **{**safe, "candidate_alt_msl_m": 479.9}
+            )
+        )
+        self.assertTrue(
+            terrain_clearance_allowed(
+                -1.0,
+                terrain_fresh=False,
+                hagl_fresh=False,
+                aircraft_alt_msl_m=math.nan,
+                terrain_alt_msl_m=math.nan,
+                hagl_m=math.nan,
+                candidate_alt_msl_m=math.nan,
+            )
+        )
+        self.assertFalse(terrain_clearance_allowed(-0.5, **safe))
+
+    def test_handler_requires_fresh_terrain_hagl_and_candidate_clearance(self) -> None:
+        clearance = re.search(
+            r"bool MavlinkMHandler::intercept_terrain_clearance_valid.*?\n\}",
+            HANDLER,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(clearance)
+        body = clearance.group(0)
+        for contract in (
+            "_intercept_clearance_m < 0.f",
+            "_global_position.terrain_alt_valid",
+            "_local_position.dist_bottom_valid",
+            "now - _global_position.timestamp < 2'000'000",
+            "now - _local_position.timestamp < 2'000'000",
+            "_global_position.alt - _global_position.terrain_alt",
+            "candidate_altitude_m - _global_position.terrain_alt",
+            "_local_position.dist_bottom < _intercept_clearance_m",
+            "MAV_M_INT_CLR requires fresh terrain and HAGL",
+            "MAV_M_INT_CLR terrain clearance breached",
+        ):
+            self.assertIn(contract, body)
+        self.assertIn(
+            "intercept_terrain_clearance_valid(assignment.alt, reason)", HANDLER
+        )
+        self.assertIn(
+            "intercept_terrain_clearance_valid(_active.alt, reason)", HANDLER
+        )
+        self.assertIn(
+            "intercept_terrain_clearance_valid(_intercept_acceptance_altitude_m, reason)",
+            HANDLER,
+        )
+        self.assertIn("const bool recovery_navigation_owned", HANDLER)
+        self.assertIn("!recovery_navigation_owned", HANDLER)
+        self.assertIn("ORB_ID(vehicle_local_position)", HEADER)
+
+    def test_navigator_rechecks_actual_and_candidate_clearance(self) -> None:
+        policy = re.search(
+            r"bool Navigator::mavlink_m_fly_through_allowed.*?\n\}",
+            NAVIGATOR,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(policy)
+        body = policy.group(0)
+        for contract in (
+            "minimum_clearance_m >= 0.f",
+            "_global_pos.terrain_alt_valid",
+            "_local_pos.dist_bottom_valid",
+            "now - _local_pos.timestamp <= MavlinkMStateMaxAge",
+            "_global_pos.alt - _global_pos.terrain_alt",
+            "alt - _global_pos.terrain_alt",
+            "_local_pos.dist_bottom < minimum_clearance_m",
+        ):
+            self.assertIn(contract, body)
+        endpoint_policy = re.search(
+            r"bool\nLoiter::fly_through_endpoints_allowed\(\).*?\n\}",
+            LOITER,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(endpoint_policy)
+        self.assertIn("_fly_through_minimum_clearance", endpoint_policy.group(0))
+        self.assertIn("_fly_through_recovery_lat", endpoint_policy.group(0))
+
+    def test_surveyed_corridor_override_is_explicit_and_still_local(self) -> None:
+        self.assertIn("sanitize_intercept_clearance(-1.f)", HANDLER)
+        self.assertIn(
+            "MAV_M_INT_CLR=-1: externally surveyed corridor override accepted locally "
+            "for this effect-2 cue",
+            HANDLER,
+        )
+        self.assertIn(
+            "exact Intercept using externally surveyed MAV_M_INT_CLR=-1 corridor",
+            NAVIGATOR,
+        )
+        self.assertIn(
+            "requested_effect == mavlink_m_task_decision_s::EFFECT_INTERCEPT",
+            HANDLER,
+        )
+        parameter = re.search(
+            r"/\*\*(?P<body>(?:(?!/\*\*).)*?)\*/\s*"
+            r"PARAM_DEFINE_FLOAT\(MAV_M_INT_CLR,",
+            PARAMETERS,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(parameter)
+        self.assertIn("Every", parameter.group("body"))
+        self.assertIn("local effect-2 acceptance", parameter.group("body"))
+
+    def test_hit_and_miss_recover_before_target_centered_loiter(self) -> None:
+        for contract in (
+            "required_recovery_distance_m",
+            "-recovery_distance_from_target_m",
+            "recovery_lat, recovery_lon, recovery_required",
+        ):
+            self.assertIn(contract, NAVIGATOR)
+        self.assertRegex(
+            NAVIGATOR,
+            r"mavlink_m_fixed_wing_approach_distance\(\s*"
+            r"cmd\.param7, cmd\.param3,",
+        )
+        for contract in (
+            "_fly_through_target_hit = target_hit;",
+            "_fly_through_recovery_active = true;",
+            "promote_fly_through_recovery();",
+            "triplet->current.lat = _fly_through_target_lat;",
+            "triplet->current.alt = _fly_through_recovery_alt;",
+            "triplet->next = position_setpoint_s{};",
+            "target_hit ? vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED",
+            "target_hit ? 100 : 1",
+        ):
+            self.assertIn(contract, LOITER)
+
+    def test_completion_waits_for_recovery_loiter_and_actual_altitude(self) -> None:
+        self.assertIn(
+            "const bool recovery_loiter_owned = "
+            "intercept_loiter_setpoint_matches(_intercept_acceptance_altitude_m);",
+            HANDLER,
+        )
+        self.assertIn("RecoveryAltitudeToleranceM = 5.f", HANDLER)
+        self.assertIn(
+            "fabsf(_global_position.alt - _intercept_acceptance_altitude_m)",
+            HANDLER,
+        )
+        self.assertIn(
+            "const bool recovery_dwell_eligible = inside_radius && recovery_altitude_reached;",
+            HANDLER,
+        )
+        completion = re.search(
+            r"if \(!intercept_completion_allowed.*?\n\t\}",
+            HANDLER,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(completion)
+        self.assertIn("recovery_altitude_within_tolerance", completion.group(0))
+        self.assertNotIn(
+            "intercept_loiter_setpoint_matches(_intercept_expected_altitude_m)",
+            completion.group(0),
+        )
+
     def test_vertical_delta_model_is_bounded(self) -> None:
         acceptance_alt = 500.0
         cue_alt = 575.0
         self.assertTrue(math.isfinite(cue_alt))
         self.assertLessEqual(abs(cue_alt - acceptance_alt), 100.0)
         self.assertGreater(abs(650.1 - acceptance_alt), 100.0)
+
+    def test_timesync_response_is_initialized_and_addressed_to_requester(self) -> None:
+        response = re.search(
+            r"if \(tsync\.tc1 == 0\).*?"
+            r"mavlink_msg_timesync_send_struct\(_mavlink->get_channel\(\), &rsync\);",
+            MAVLINK_TIMESYNC,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(response)
+        body = response.group(0)
+        self.assertIn("mavlink_timesync_t rsync{};", body)
+        self.assertIn("rsync.target_system = msg->sysid;", body)
+        self.assertIn("rsync.target_component = msg->compid;", body)
+        self.assertLess(
+            body.index("rsync.target_system = msg->sysid;"),
+            body.index("mavlink_msg_timesync_send_struct"),
+        )
+        self.assertLess(
+            body.index("rsync.target_component = msg->compid;"),
+            body.index("mavlink_msg_timesync_send_struct"),
+        )
 
 
 if __name__ == "__main__":
