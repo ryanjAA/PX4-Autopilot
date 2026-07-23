@@ -1202,16 +1202,20 @@ class InterceptPolicyTest(unittest.TestCase):
         )
         self.assertIn("advertise_gcs(endpoint, 0.0)", SITL_RUNNER)
 
-    def test_sitl_data_tree_precedes_px4_options(self) -> None:
+    def test_sitl_px4_options_precede_data_tree(self) -> None:
         self.assertRegex(
             SITL_RUNNER,
             r"str\(self\.binary\),\s*\"-i\"[\s\S]*?str\(self\.etc\)",
         )
         if DUAL_RUNNER:
-            self.assertRegex(
-                DUAL_RUNNER,
-                r'"\$command"\s+"\$PX4"\s+"\$BUILD/etc"\s+"\$instance"',
-            )
+            for instance in (43, 44):
+                self.assertIn(
+                    (
+                        rf'\"$PX4\" -i {instance} '
+                        rf'\"$RUN_ROOT/rootfs/{instance}/etc\"'
+                    ),
+                    DUAL_RUNNER,
+                )
 
     def test_esad_output_selection_never_uses_stale_parameter_cache(self) -> None:
         self.assertIn(
