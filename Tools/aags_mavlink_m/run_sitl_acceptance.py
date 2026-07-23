@@ -574,6 +574,8 @@ def expect_no_matching_message(
 
 
 def mavftp_create_payload(sequence: int, path: str) -> bytes:
+    if not path.startswith("/"):
+        path = "/" + path
     encoded_path = path.encode("utf-8") + b"\0"
     if len(encoded_path) > 239:
         raise AcceptanceFailure("MAVFTP test path is too long")
@@ -2788,7 +2790,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             )
         no_fence_command = px4.vehicle_command_status()
         if (
-            re.search(r"\bcommand:\s*100002\b", no_fence_command) is None
+            re.search(r"\bcommand:\s*100001\b", no_fence_command) is None
             or abs(output_float(no_fence_command, "param7") - no_fence_altitude) > 0.2
         ):
             raise AcceptanceFailure(
@@ -2858,7 +2860,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             r"\btimestamp:\s*(\d+)\b", intercept_command
         )
         if (
-            re.search(r"\bcommand:\s*100002\b", intercept_command) is None
+            re.search(r"\bcommand:\s*100001\b", intercept_command) is None
             or first_intercept_timestamp is None
             or intercept_token_low != int(intercept_token_low)
             or intercept_token_high != int(intercept_token_high)
@@ -2923,7 +2925,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             or int(sustained_intercept_timestamp.group(1))
             != int(first_intercept_timestamp.group(1))
             or re.search(
-                r"\bcommand:\s*100002\b", sustained_intercept_command
+                r"\bcommand:\s*100001\b", sustained_intercept_command
             )
             is None
         ):
@@ -3007,7 +3009,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             r"\btimestamp:\s*(\d+)\b", radius_independent_command
         )
         if (
-            re.search(r"\bcommand:\s*100002\b", radius_independent_command) is None
+            re.search(r"\bcommand:\s*100001\b", radius_independent_command) is None
             or radius_independent_timestamp is None
             or (
                 abs(output_float(radius_independent_command, "param1") - 500.0) < 0.001
@@ -3034,7 +3036,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             r"\btimestamp:\s*(\d+)\b", completion_command
         )
         if (
-            re.search(r"\bcommand:\s*100002\b", completion_command) is None
+            re.search(r"\bcommand:\s*100001\b", completion_command) is None
             or completion_timestamp is None
             or int(completion_timestamp.group(1))
             != int(radius_independent_timestamp.group(1))
@@ -3356,7 +3358,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             )
             if (
                 re.search(
-                    r"\bcommand:\s*100002\b", owner_intercept_initial_command
+                    r"\bcommand:\s*100001\b", owner_intercept_initial_command
                 )
                 is None
                 or owner_token_low != int(owner_token_low)
@@ -3394,7 +3396,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             )
             if (
                 re.search(
-                    r"\bcommand:\s*100002\b", owner_intercept_completion_command
+                    r"\bcommand:\s*100001\b", owner_intercept_completion_command
                 )
                 is None
                 or owner_intercept_completion_timestamp is None
