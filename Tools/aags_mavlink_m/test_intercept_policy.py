@@ -1031,9 +1031,16 @@ class InterceptPolicyTest(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(setpoint_handler)
-        self.assertIn(
-            "!pos_sp_curr.mavlink_m_exact_altitude",
+        loiter_conversion_guard = re.search(
+            r"if \(!pos_sp_curr\.mavlink_m_exact_altitude"
+            r"(?P<body>.*?)\n\t\t\}",
             setpoint_handler.group("body"),
+            re.DOTALL,
+        )
+        self.assertIsNotNone(loiter_conversion_guard)
+        self.assertIn(
+            "position_sp_type = position_setpoint_s::SETPOINT_TYPE_LOITER;",
+            loiter_conversion_guard.group("body"),
         )
 
         position_control = re.search(
@@ -1044,9 +1051,19 @@ class InterceptPolicyTest(unittest.TestCase):
         )
         self.assertIsNotNone(position_control)
         position_body = position_control.group("body")
+        self.assertEqual(position_body.count("altitude_completion_radius"), 4)
         self.assertRegex(
             position_body,
             r"pos_sp_curr\.mavlink_m_exact_altitude\s*\?\s*0\.f",
+        )
+        self.assertIn("if (d_curr_prev > altitude_completion_radius)", position_body)
+        self.assertIn(
+            "if (_min_current_sp_distance_xy > altitude_completion_radius)",
+            position_body,
+        )
+        self.assertIn(
+            "d_curr_prev - altitude_completion_radius",
+            position_body,
         )
         exact_rate_block = re.search(
             r"if \(pos_sp_curr\.mavlink_m_exact_altitude\) \{"
@@ -1063,6 +1080,44 @@ class InterceptPolicyTest(unittest.TestCase):
             "_ctrl_configuration_handler.setClimbRateTarget(_param_fw_t_clmb_max.get())",
             exact_rate_block.group("body"),
         )
+
+    def test_v117_intercept_loiters_use_explicit_orbit_fields(self) -> None:
+        approach = re.search(
+            r"Loiter::promote_fly_through_approach\(\)"
+            r"(?P<body>.*?)\n\}",
+            LOITER,
+            re.DOTALL,
+        )
+        completion = re.search(
+            r"Loiter::complete_fly_through\(bool target_hit\)"
+            r"(?P<body>.*?)\n\}",
+            LOITER,
+            re.DOTALL,
+        )
+        recovery = re.search(
+            r"Loiter::promote_fly_through_recovery\(\)"
+            r"(?P<body>.*?)\n\}",
+            LOITER,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(approach)
+        self.assertIsNotNone(completion)
+        self.assertIsNotNone(recovery)
+
+        for field in (
+            "triplet->next.loiter_radius = _navigator->get_default_loiter_rad();",
+            "triplet->next.loiter_direction_counter_clockwise = _navigator->get_default_loiter_CCW();",
+            "triplet->next.loiter_pattern = position_setpoint_s::LOITER_TYPE_ORBIT;",
+        ):
+            self.assertIn(field, approach.group("body"))
+
+        for body in (completion.group("body"), recovery.group("body")):
+            for field in (
+                "triplet->current.loiter_radius = _navigator->get_default_loiter_rad();",
+                "triplet->current.loiter_direction_counter_clockwise = _navigator->get_default_loiter_CCW();",
+                "triplet->current.loiter_pattern = position_setpoint_s::LOITER_TYPE_ORBIT;",
+            ):
+                self.assertIn(field, body)
 
     def test_same_coordinate_waits_for_vertical_arrival(self) -> None:
         degenerate_leg = re.search(
