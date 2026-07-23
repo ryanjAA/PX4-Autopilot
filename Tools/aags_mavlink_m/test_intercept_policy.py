@@ -1024,18 +1024,44 @@ class InterceptPolicyTest(unittest.TestCase):
 
     def test_exact_altitude_path_does_not_finish_early(self) -> None:
         self.assertIn("bool mavlink_m_exact_altitude", POSITION_SETPOINT)
-        self.assertIn("!pos_sp_curr.mavlink_m_exact_altitude", FW_CONTROL)
-        self.assertRegex(
+        setpoint_handler = re.search(
+            r"FixedWingModeManager::handle_setpoint_type\(.*?\)\n\{"
+            r"(?P<body>.*?)\n\}",
             FW_CONTROL,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(setpoint_handler)
+        self.assertIn(
+            "!pos_sp_curr.mavlink_m_exact_altitude",
+            setpoint_handler.group("body"),
+        )
+
+        position_control = re.search(
+            r"FixedWingModeManager::control_auto_position\(.*?\)\n\{"
+            r"(?P<body>.*?)\n\}",
+            FW_CONTROL,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(position_control)
+        position_body = position_control.group("body")
+        self.assertRegex(
+            position_body,
             r"pos_sp_curr\.mavlink_m_exact_altitude\s*\?\s*0\.f",
         )
+        exact_rate_block = re.search(
+            r"if \(pos_sp_curr\.mavlink_m_exact_altitude\) \{"
+            r"(?P<body>.*?)\n\t\}",
+            position_body,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(exact_rate_block)
         self.assertIn(
             "_ctrl_configuration_handler.setSinkRateTarget(_param_fw_t_sink_max.get())",
-            FW_CONTROL,
+            exact_rate_block.group("body"),
         )
         self.assertIn(
             "_ctrl_configuration_handler.setClimbRateTarget(_param_fw_t_clmb_max.get())",
-            FW_CONTROL,
+            exact_rate_block.group("body"),
         )
 
     def test_same_coordinate_waits_for_vertical_arrival(self) -> None:
