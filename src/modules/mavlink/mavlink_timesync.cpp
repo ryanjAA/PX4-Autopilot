@@ -61,10 +61,12 @@ MavlinkTimesync::handle_message(const mavlink_message_t *msg)
 
 			if (tsync.tc1 == 0) {			// Message originating from remote system, timestamp and return it
 
-				mavlink_timesync_t rsync;
+				mavlink_timesync_t rsync{};
 
 				rsync.tc1 = now * 1000ULL;
 				rsync.ts1 = tsync.ts1;
+				rsync.target_system = msg->sysid;
+				rsync.target_component = msg->compid;
 
 				mavlink_msg_timesync_send_struct(_mavlink.get_channel(), &rsync);
 
