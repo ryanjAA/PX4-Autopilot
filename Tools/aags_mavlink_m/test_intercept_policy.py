@@ -21,7 +21,7 @@ VEHICLE_COMMAND = (ROOT / "msg/versioned/VehicleCommand.msg").read_text()
 NAVIGATOR = (ROOT / "src/modules/navigator/navigator_main.cpp").read_text()
 LOITER = (ROOT / "src/modules/navigator/loiter.cpp").read_text()
 NAVIGATOR_HEADER = (ROOT / "src/modules/navigator/navigator.h").read_text()
-FW_CONTROL = (ROOT / "src/modules/fw_pos_control/FixedwingPositionControl.cpp").read_text()
+FW_CONTROL = (ROOT / "src/modules/fw_mode_manager/FixedWingModeManager.cpp").read_text()
 POSITION_SETPOINT = (ROOT / "msg/PositionSetpoint.msg").read_text()
 COMMANDER = (ROOT / "src/modules/commander/Commander.cpp").read_text()
 MAVLINK_MAIN = (ROOT / "src/modules/mavlink/mavlink_main.cpp").read_text()
@@ -1029,8 +1029,14 @@ class InterceptPolicyTest(unittest.TestCase):
             FW_CONTROL,
             r"pos_sp_curr\.mavlink_m_exact_altitude\s*\?\s*0\.f",
         )
-        self.assertIn("? _param_fw_t_sink_max.get()", FW_CONTROL)
-        self.assertIn("? _param_fw_t_clmb_max.get()", FW_CONTROL)
+        self.assertIn(
+            "_ctrl_configuration_handler.setSinkRateTarget(_param_fw_t_sink_max.get())",
+            FW_CONTROL,
+        )
+        self.assertIn(
+            "_ctrl_configuration_handler.setClimbRateTarget(_param_fw_t_clmb_max.get())",
+            FW_CONTROL,
+        )
 
     def test_same_coordinate_waits_for_vertical_arrival(self) -> None:
         degenerate_leg = re.search(

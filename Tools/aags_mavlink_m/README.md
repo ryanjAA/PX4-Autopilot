@@ -6,12 +6,12 @@ dialect used by AAGS.
 
 Branch scope:
 
-- `v1.16-CAM-MAV-M` is based on PX4 `v1.16.1` at
-  `94cb2012792b2ae89f0b147cfee53ee31ae550be`.
+- `v1.17-CAM-MAV-M` is based on PX4 `v1.17.0` at
+  `d6f12ad1c4f70ad3230afd7d86e971421e02fef4`.
 - The branch contains the production receiver, authority state machine, owner
   decisions, ACK behavior, action policy, safety gates, conformance sources,
   endpoint tool, production board enablement, and SITL validation tools.
-- The dual-instance runner uses the normal PX4 1.16 Gazebo Harmonic support.
+- The dual-instance runner uses the normal PX4 1.17 Gazebo Harmonic support.
   It does not include the PX4 1.14 workstation compatibility patch set.
 
 Profile identity:
@@ -66,7 +66,7 @@ configuration. A different interpreter, generator revision, or XML fails
 closed instead of creating different wire headers.
 
 The AAGS-enabled FMUv6X and FMUv6C configurations deliberately omit
-`CONFIG_MODULES_UXRCE_DDS_CLIENT`. PX4 1.16 has insufficient flash for both
+`CONFIG_MODULES_UXRCE_DDS_CLIENT`. PX4 1.17 has insufficient flash for both
 the complete MAVLink-M receiver and the ROS 2 uXRCE-DDS client while retaining
 the selected flight, navigation, camera, logging, and MAVLink features. The
 configure output states this tradeoff explicitly. These firmware images do
@@ -544,7 +544,7 @@ airborne-Hold state, failsafe/failure state, global position, vertical limit,
 fresh terrain/HAGL, actual and candidate clearance, and ownership of the
 level-entry, exact-target, straight-recovery, and recovery-loiter setpoints.
 While Intercept is active, Loiter revalidates every active endpoint on every
-cycle. PX4 1.16 cannot prove that the whole fixed-wing approach corridor stays
+cycle. PX4 1.17 cannot prove that the whole fixed-wing approach corridor stays
 inside a restrictive geofence, so exact Intercept is rejected whenever an
 actual polygon, circle, `GF_MAX_HOR_DIST`, or `GF_MAX_VER_DIST` restriction is
 configured and `GF_ACTION` is `LOITER`, `RTL`, `TERMINATE`, or `LAND`.
@@ -573,7 +573,7 @@ If the replacement fails any permission or flight-state gate, the new cue
 stays Pending and the old active cue continues unchanged. Legacy
 accepted-queue state is restored as Pending.
 
-PX4 1.16 Commander requires the
+PX4 1.17 Commander requires the
 `MAV_DO_REPOSITION_FLAGS_CHANGE_MODE` bit (`param2=1`) to acknowledge
 the level Travel command.
 The private fly-through command is internal to PX4 and cannot be serialized as
@@ -590,7 +590,7 @@ payload authority.
 
 ## One-computer two-AAGS SITL test
 
-Build PX4 SITL with the normal v1.16 Gazebo Harmonic dependencies, then start
+Build PX4 SITL with the normal v1.17 Gazebo Harmonic dependencies, then start
 the deterministic dual-aircraft lab:
 
 ```sh
@@ -659,7 +659,7 @@ AAGS_DUAL_PORT_OFFSET=20 \
 Tools/aags_mavlink_m/run_dual_gz.sh start
 ```
 
-That example creates SYS64/SYS65 on Fleet ports 18633/18634. PX4 1.16 derives
+That example creates SYS64/SYS65 on Fleet ports 18633/18634. PX4 1.17 derives
 the Fleet port from the SITL instance, so the two offsets must match. The
 runner validates their ranges before starting any process.
 

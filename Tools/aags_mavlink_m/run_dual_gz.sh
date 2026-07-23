@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Deterministic two-aircraft Gazebo Harmonic lab for AAGS/MAVLink-M testing.
-# The runner uses only normal PX4 1.16 Gazebo support, isolated rootfs
+# The runner uses only normal PX4 1.17 Gazebo support, isolated rootfs
 # directories, one private Gazebo partition, and no global process kills.
 
 set -euo pipefail
@@ -28,7 +28,7 @@ RUN_ROOT_MARKER_NAME=".aags-dual-gz-owned"
 	|| { echo "error: AAGS_DUAL_PORT_OFFSET must be an integer" >&2; exit 1; }
 [[ "$INSTANCE_OFFSET" == "$PORT_OFFSET" ]] \
 	|| {
-		echo "error: PX4 1.16 derives its Fleet UDP port from the SITL instance;" >&2
+		echo "error: PX4 1.17 derives its Fleet UDP port from the SITL instance;" >&2
 		echo "       AAGS_DUAL_INSTANCE_OFFSET and AAGS_DUAL_PORT_OFFSET must match" >&2
 		exit 1
 	}
@@ -47,7 +47,7 @@ SECOND_WINDOW="sys$SECOND_SYSID"
 (( FIRST_PORT >= 1024 && SECOND_PORT <= 65535 )) \
 	|| { echo "error: port offset produces a Fleet UDP port outside 1024..65535" >&2; exit 1; }
 (( FIRST_PORT == 18570 + FIRST_INSTANCE && SECOND_PORT == 18570 + SECOND_INSTANCE )) \
-	|| { echo "error: Fleet UDP ports do not match the PX4 1.16 SITL port formula" >&2; exit 1; }
+	|| { echo "error: Fleet UDP ports do not match the PX4 1.17 SITL port formula" >&2; exit 1; }
 
 usage() {
 	cat <<'EOF'
@@ -78,7 +78,7 @@ Optional environment:
   AAGS_DUAL_INSTANCE_OFFSET=N       Add N to both PX4 instances and sysids
   AAGS_DUAL_PORT_OFFSET=N           Add the same N to both Fleet UDP ports
 
-PX4 1.16 derives the GCS/Fleet port as 18570 plus the SITL instance, so the
+PX4 1.17 derives the GCS/Fleet port as 18570 plus the SITL instance, so the
 two offsets must match. Their default is zero, which preserves SYS44/SYS45 and
 ports 18613/18614.
 EOF
