@@ -106,7 +106,7 @@ class Px4Sitl:
         )
         self.reader = threading.Thread(target=self._read_output, daemon=True)
         self.reader.start()
-        self.wait_for("Startup script returned successfully", start_line, 45.0)
+        self.wait_for("Ready for takeoff!", start_line, 45.0)
         return start_line
 
     def _read_output(self) -> None:
