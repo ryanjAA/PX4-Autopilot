@@ -44,6 +44,15 @@ PATH=/tmp/px4-aags-venv/bin:$PATH make px4_sitl_default
 PATH=/tmp/px4-aags-venv/bin:$PATH make ark_fmu-v6x_default
 ```
 
+The AAGS-enabled ARK FMUv6X configuration deliberately omits
+`CONFIG_MODULES_UXRCE_DDS_CLIENT`. PX4 1.14 has insufficient flash for both
+the complete MAVLink-M receiver and the ROS 2 uXRCE-DDS client while retaining
+the selected Albatross fixed-wing, navigation, camera, sensor, logging,
+Ethernet, and MAVLink features. This firmware image does not provide the PX4
+ROS 2/DDS client. A deployment that requires ROS 2 must use a separate board
+configuration, re-enable the client, and recover the required flash from
+features that deployment does not need.
+
 The SITL target is supplied by `v1.14-CAM-MAV-M-SITL`. Enable the same Kconfig
 option and dialect on each additional production board that needs direct AAGS
 vehicle cue support.
@@ -58,24 +67,24 @@ First identify the zero-based instance carrying the AAGS connection:
 mavlink status
 ```
 
-The `v1.14-CAM-MAV-M-SITL` branch supplies a dual-Gazebo runner. It uses each
-vehicle's stock instance `0` link for local AAGS cue and owner-control traffic
-(`MAV_M_SAME_EP=1`). It creates instance `4` later as telemetry-only
-visibility for the other AAGS; that observer route is intentionally not a cue
-endpoint. On any vehicle or launch topology, use the instance reported by
-`mavlink status`; do not infer `MAV_M_INST` from a UDP port or MAVLink channel
-number.
+The `v1.14-CAM-MAV-M-SITL` branch supplies a dual-Gazebo runner. Each vehicle
+uses its stock instance `0` as one Fleet route for cue, owner-control, and
+observer traffic (`MAV_M_SAME_EP=1`). A bounded peer table lets both AAGS
+stations see the same receiver-confirmed state without adding an observer
+MAVLink instance. On any vehicle or launch topology, use the instance reported
+by `mavlink status`; do not infer `MAV_M_INST` from a UDP port or MAVLink
+channel number.
 
-Then choose one of two route layouts:
+Then choose one of two exact endpoint layouts:
 
 - With `MAV_M_SAME_EP=0` (default), `MAV_M_INST` receives the cue from the
   sending/peer AAGS and returns the authoritative `MAVLINK_M_ACK`, while a
   distinct owner AAGS identity on `MAV_M_CTL_INST` sees the pending review
   snapshot and requests Accept/Reject.
-- With `MAV_M_SAME_EP=1`, one local owner-control route offers the cue,
-  sees the pending review snapshot, and requests Accept/Reject. The source,
-  control system selector, exact component, MAVLink instance, and (in signed
-  mode) signing link ID must match.
+- With `MAV_M_SAME_EP=1`, one physical MAVLink instance carries cue-source and
+  owner-control traffic. `MAV_M_SRC_SYS/CMP` and `MAV_M_CTL_SYS/CMP` remain
+  independent identity checks. In signed mode the two signing link IDs must
+  match because there is only one physical route.
 
 For example, a vehicle receiving cues from AAGS `253/190` but owned by AAGS
 `254/190` can use:
@@ -95,13 +104,14 @@ param save
 reboot
 ```
 
-For a vehicle locally owned by AAGS `253/190` on MAVLink instance `0`, use:
+For a vehicle that accepts cues from any AAGS but reserves owner decisions for
+AAGS `253/190` on MAVLink instance `0`, use:
 
 ```text
 param set MAV_M_MODE 1
 param set MAV_M_SAME_EP 1
 param set MAV_M_INST 0
-param set MAV_M_SRC_SYS 253
+param set MAV_M_SRC_SYS -1
 param set MAV_M_SRC_CMP 190
 param set MAV_M_CTL_INST 0
 param set MAV_M_CTL_SYS 253
@@ -118,58 +128,164 @@ then sends a new vehicle cue to its own PX4. PX4 still exposes that cue as
 Pending and does not navigate until the operator explicitly selects
 **ACCEPT VEHICLE CUE** (or makes the equivalent RC/local-console decision).
 
-On a mesh where any authorized AAGS station may offer or decide a cue, use
-`-1` for the relevant system selector:
-
-```text
-param set MAV_M_SRC_SYS -1
-param set MAV_M_SRC_CMP 190
-param set MAV_M_CTL_SYS -1
-param set MAV_M_CTL_CMP 190
-```
-
-The wildcard matches any nonzero system ID only on `MAV_M_INST` for cues and
-only on `MAV_M_CTL_INST` for decisions. The component check remains exact.
-Signed mode still requires the configured signing link and key. Observer,
-forwarding, and other MAVLink instances do not gain authority. With
-`MAV_M_SAME_EP=1`, use the same system selector on both sides, either the same
-exact system ID or `-1` for both. With `MAV_M_SAME_EP=0`, the two instances
-must remain distinct. Different wildcard-authorized sources must use unique cue
-IDs while their tasks remain stored because an owner decision carries no cue
-source-system field.
-
 `MAV_M_MODE=1` is unsigned lab mode. `MAV_M_MODE=2` requires MAVLink 2 signing
-on the selected physical link. Frames from another MAVLink instance, a wrong
-component, or a system outside an exact selector are ignored.
+on the selected physical link. Frames from another source or another MAVLink
+instance are ignored.
 
 Network decisions are disabled by default (`MAV_M_CTL_INST=-1`,
 `MAV_M_CTL_SYS=0`). With `MAV_M_SAME_EP=0`, the control instance must differ
-from the cue instance. Identical exact system/component identities are rejected,
-while wildcard identities may overlap because the configured routes preserve
-the two roles. With `MAV_M_SAME_EP=1`, the routes and source selectors must
-match; partial overlap is invalid and disables network decisions.
-Same-endpoint mode changes who may present the cue, not the
-acceptance safeguard: sending never auto-accepts or moves the aircraft.
+from the cue instance. With `MAV_M_SAME_EP=1`, both roles use the same
+instance, but their source and control identity selectors may differ. For
+example, `MAV_M_SRC_SYS=-1` may receive cues from every authorized station
+while `MAV_M_CTL_SYS=253` reserves Accept, Reject, and Abort for station 253.
+Set `MAV_M_CTL_SYS=-1` only when every station on that secured route is
+intended to have control authority. Same-endpoint mode changes who may present
+or decide a cue, not the acceptance safeguard: sending never auto-accepts or
+moves the aircraft.
 Wrong-instance, broadcast-target, stale-ID, wrong-source, and malformed
 decision requests are denied and never reach PX4's generic command path.
 
 Route and source parameters fail closed even if written outside their metadata
-bounds: instances must be `0..5`; cue system selectors must be `-1` or
-`1..255`; owner system selectors must be `-1`, `1..255`, or `0` only when
-network decisions are disabled; component IDs must be `1..255`; and mode-2
-signing link IDs must be `0..255`. The two signing IDs must differ for separate
-endpoints and match for the same endpoint.
-Invalid values disable the affected endpoint instead of wrapping through an
-8-bit cast. A corrupt `MAV_M_MAX_AGE` outside `0..600` is corrected to the
-safe 30-second default.
+bounds: instances must be `0..5`, source and owner system IDs must be
+`1..255` or the documented `-1` wildcard, component IDs must be an exact
+`1..255`, and mode-2 signing link IDs must be `0..255`. The two signing IDs
+must differ for separate endpoints and match for the same endpoint. Invalid
+values disable the affected endpoint instead of wrapping through an 8-bit
+cast. A corrupt `MAV_M_MAX_AGE` outside `0..600` is corrected to the safe
+30-second default.
 
-Changing `MAV_M_INST`, `MAV_M_SRC_SYS`, or `MAV_M_SRC_CMP` invalidates the old
-receiver identity and its stored tasks. If an active cue issued navigation,
-PX4 first publishes a current-position stop. The selector change is rejected
-and the prior values are restored if that stop or persisted-state invalidation
-cannot be confirmed. A state file whose route, source selector, component, or
-profile does not match the selected endpoint is deleted, so switching a
-selector back later cannot resurrect an old task.
+## Multi-AAGS UDP fleet route
+
+Each PX4 vehicle can now serve several AAGS stations from one selected UDP
+MAVLink instance. No router or additional vehicle computer is required for
+this bounded direct mode.
+
+PX4 learns a station only after receiving a complete, CRC-valid
+`MAV_TYPE_GCS` heartbeat on a selected MAVLink-M route. The component must
+match `MAV_M_SRC_CMP` on the cue route or `MAV_M_CTL_CMP` on the owner-control
+route. When both roles share one route, either configured component may
+register. In signed mode, that heartbeat must also pass MAVLink 2 signature,
+replay validation, and the signing link configured for its role. The station
+identity is bound to its full source tuple: system ID, component ID, source
+IPv4 address, and source UDP port. An exact match refreshes the entry. A live
+identity cannot move to another endpoint, and one live endpoint cannot claim
+another identity. The old entry must expire before either change is accepted.
+
+The same authorized `MAV_TYPE_GCS` heartbeat also sustains cue-source
+liveness for movement. It must arrive on `MAV_M_INST`, match
+`MAV_M_SRC_SYS/CMP` and the learned endpoint, and use the configured signing
+link in mode 2. A source does not need to retransmit unchanged task messages.
+If that heartbeat and task traffic are both silent for 15 seconds, a pending
+movement acceptance is blocked and an active Intercept is permanently aborted
+to Hold. A later heartbeat does not resume the aborted Intercept.
+
+Configure the bounded table with:
+
+```text
+param set MAV_M_PEERS 4
+param set MAV_M_P_TMO 30
+param save
+reboot
+```
+
+`MAV_M_PEERS` defaults to four and accepts `0..8`. Values `1..8` select direct
+multi-AAGS mode. The table is fixed at eight entries and performs no dynamic
+allocation. `MAV_M_P_TMO` defaults to 30 seconds and accepts `5..300`. A
+station must keep sending its normal heartbeat before the timeout. The
+separately configured MAVLink partner remains pinned and is never replaced by
+this table.
+
+Direct-mode `TRACK_IDENTITY`, `TARGET_CUE`, `TARGET_HANDOVER`, owner
+`MAV_CMD_USER_1`, and ESAD control traffic is accepted only when the complete
+message source identity and current UDP source tuple match a live learned
+entry. An expired, unregistered, moved, or partially matching endpoint is
+denied before any generic command or forwarding path. After peer admission,
+ordinary arm and mode commands, missions, parameter writes, FTP, timesync, RC
+override, manual control, and all other generic MAVLink ingress are restricted
+to the exact or wildcard `MAV_M_CTL_SYS/CMP` identity on `MAV_M_CTL_INST`.
+Non-owner learned peers are read-only observers. They may register and refresh
+with validated GCS heartbeats, receive telemetry and task state, and submit
+task frames only when `MAV_M_SRC_SYS/CMP` authorizes them. They cannot reach
+ordinary PX4 handlers or forwarding. Serial links and UDP instances where no
+MAVLink-M route is selected retain their existing behavior. PX4 also resets
+partial MAVLink framing at every UDP datagram boundary, so bytes from one
+endpoint can never complete a frame started by another endpoint.
+
+Set `MAV_M_PEERS=0` for gateway mode:
+
+```text
+param set MAV_M_PEERS 0
+param save
+reboot
+```
+
+Value zero disables learned-peer admission and fanout, but preserves an
+explicitly configured `-t` partner. The `-t` address plus the configured `-o`
+port form the one authorized gateway source tuple. Gateway mode without an
+explicit `-t` partner fails closed for protected UDP traffic; PX4 never turns
+the first raw datagram into a trusted gateway. Use gateway mode when one
+vehicle-side MAVLink router or mesh
+gateway represents many downstream AAGS identities from one UDP source
+endpoint. PX4 then sends one copy to the pinned gateway, and the gateway owns
+fanout. Without this mode, the direct peer table would correctly reject the
+second GCS identity seen from the gateway's already-registered endpoint as a
+live identity conflict.
+
+An invalid `MAV_M_PEERS` value is corrected to zero, not four. This makes a
+damaged or out-of-range setting fail closed instead of unexpectedly enabling
+direct peer learning.
+
+The selected PX4 instance unicasts its normal outbound stream and
+receiver-confirmed AAGS state to every live learned station. This makes the
+same accepted or active cue visible at every observer. Learning a peer does
+not grant task-source, owner-control, or ordinary PX4 command permission.
+`MAV_M_SRC_SYS/CMP` and `MAV_M_CTL_SYS/CMP` are evaluated independently for
+every request. Receiver status includes `AAGS_CSYS` and `AAGS_CCMP` so an
+observer can show the active state without presenting controls it does not
+own.
+
+PX4 continues a discovery heartbeat while `MAV_M_PEERS` is greater than one,
+even after the first station connects. Only `HEARTBEAT` uses this broadcast
+exception. `TARGET_CUE`, `TARGET_HANDOVER`, acknowledgements, parameter data,
+and vehicle telemetry are not broadcast. They are sent only to the pinned
+partner and validated learned peers.
+
+Use one unique MAVLink system ID per AAGS station. In production, vehicles on
+different IP addresses may all use the same PX4 UDP service port. AAGS must
+open one shared fleet UDP socket, not one separately bound Comm Link per
+vehicle. It distinguishes vehicles by source IP address and MAVLink system ID.
+For example:
+
+```text
+Vehicle 44: 10.42.0.44:14556
+Vehicle 45: 10.42.0.45:14556
+Vehicle 46: 10.42.0.46:14556
+```
+
+The bind collision occurs only when separate processes or separate sockets on
+the same host try to own the same local address and port. Multiple PX4 SITL
+processes on one computer therefore need distinct PX4 service ports. Two AAGS
+processes on one test computer likewise need different local receive ports,
+such as `14551` and `14552`. On separate computers, AAGS stations may all use
+the same conventional local receive port because each computer owns a
+different IP address.
+
+Each AAGS sends its component-190 heartbeat through its one fleet socket to
+each vehicle endpoint it wants to observe. AAGS should learn an endpoint from
+the source address and source port of the vehicle heartbeat, then reply to that
+exact tuple. The return heartbeat registers the station's actual IP address
+and source port, so neither side needs a preloaded list of peer IP addresses.
+If the mesh does not carry IPv4 broadcast between nodes, configure one mesh
+gateway or static bootstrap destination; learned traffic remains unicast after
+that first contact.
+
+Use `mavlink status` to inspect the live table. It prints the selected
+instance's peer count, timeout, GCS identity, endpoint, age, registrations,
+expirations, conflicts, table-full rejections, send errors, successful fanout
+copies, and aggregate fanout bytes. Conflict and full-table warnings are
+rate-limited while their counters continue to record every event. A conflict
+is not automatically reassigned. Correct the duplicate GCS ID or endpoint and
+wait for `MAV_M_P_TMO`, or reboot the vehicle after correcting the station.
 
 `MAV_M_MAX_AGE` is the replay window and pending lifetime for `TARGET_CUE`.
 `TARGET_HANDOVER` also carries its own explicit expiry. Setting the parameter
@@ -275,6 +391,7 @@ param set MAV_M_ACTION 2
 param set MAV_M_INT_RAD 25
 param set MAV_M_INT_DWL 3
 param set MAV_M_INT_DZ 100
+param set MAV_M_INT_CLR 30
 param save
 ```
 
@@ -308,14 +425,22 @@ approach and exact crossing:
    acceptance radius. Navigator accepts the first crossing only when both the
    horizontal and vertical misses are no more than 5 m. A PX4-local,
    token-matched Navigator ACK proves which exact request completed.
-4. After crossing, the aircraft enters a target-centered loiter at cue
-   altitude. After it remains continuously inside the effective arrival radius
-   for `MAV_M_INT_DWL`, PX4 reports the intercept as complete. It does not send
-   a second altitude reposition.
+4. After either a hit or a miss, the aircraft recovers to the AMSL altitude
+   sampled at local acceptance. A fixed wing first continues straight past the
+   target on a climb or descent segment calculated from the same wind, pitch,
+   vertical-rate, and airspeed limits. It turns only after reaching the
+   recovery waypoint and the acceptance-time altitude. PX4 then establishes a
+   target-centered loiter at that recovery altitude. A multicopter establishes
+   the same target-centered recovery loiter directly.
+5. A hit becomes complete only after Navigator owns that recovery loiter, the
+   actual aircraft altitude is within 5 m of the acceptance-time AMSL altitude,
+   and the aircraft remains continuously inside the effective arrival radius
+   for `MAV_M_INT_DWL`. The receiver never reports completion while the
+   aircraft is still at cue altitude or while the straight recovery is active.
 
 `MAV_M_INT_RAD` is only the configured post-crossing dwell radius. It never
-changes the fixed 5 m horizontal and vertical fly-through hit tests. For fixed wing, the
-effective post-crossing dwell radius is
+changes the fixed 5 m horizontal and vertical fly-through hit tests. For fixed
+wing, the effective post-crossing dwell radius is
 `max(MAV_M_INT_RAD, abs(NAV_LOITER_RAD) + 10 m)` so an aircraft established on
 its commanded loiter circle can satisfy the dwell. Multicopters use
 `MAV_M_INT_RAD`. Leaving the radius resets the complete dwell. The mandatory
@@ -323,19 +448,46 @@ target-plane crossing and matching internal completion ACK are separate from
 this radius and always occur first. The request token remains inside PX4 and
 the private command and ACK are not emitted on MAVLink.
 
-If the first bounded crossing misses, Navigator still establishes the planned
-target-centered loiter so the aircraft remains near the cue, but it holds the
-interpolated crossing altitude or current aircraft AMSL if interpolation is
-unavailable. It clears the exact-altitude flag and never continues descending
-toward cue altitude after a failed crossing. PX4 reports the intercept as
-`ABORTED`, records the miss, and permanently blocks completion for that
-acceptance. The operator must abort it and accept a fresh cue before another
-attempt. A safety, policy, source, or setpoint failure instead cancels the
-private navigation request and commands a hold at the aircraft's current
-position.
+If the first bounded crossing misses, Navigator uses the same straight
+recovery and target-centered acceptance-altitude loiter used after a hit. PX4
+reports the intercept as `ABORTED`, records the miss, and permanently blocks
+completion for that acceptance only after the recovery loiter is owned and the
+actual aircraft is within 5 m of its acceptance-time AMSL altitude. The
+operator must abort it and accept a fresh cue before another attempt. A safety,
+policy, source, terrain, or setpoint failure instead cancels the private
+navigation request and commands a hold at the aircraft's current position.
 `MAV_M_INT_DZ` is the maximum
 permitted absolute difference between acceptance altitude and cue altitude.
 A larger difference prevents that intercept.
+
+`MAV_M_INT_CLR` is the minimum terrain clearance for exact Intercept and
+defaults to 30 m. Any nonnegative setting requires fresh global terrain
+altitude and fresh valid HAGL data. Before acceptance and throughout the level
+entry, bounded slope, exact crossing, straight recovery, and recovery loiter,
+PX4 checks all of the following:
+
+- Aircraft AMSL altitude minus current terrain AMSL is at least
+  `MAV_M_INT_CLR`.
+- The independent HAGL estimate is at least `MAV_M_INT_CLR`.
+- Every active target, approach, recovery, and loiter altitude is at least
+  `MAV_M_INT_CLR` above the current terrain estimate.
+
+Missing, stale, nonfinite, or invalid terrain/HAGL data fails closed. A
+clearance breach permanently aborts that accepted Intercept. PX4 intentionally
+does not infer a safe terrain corridor from the cue altitude. This protection
+is reactive against terrain and HAGL under the current aircraft and checks
+each active setpoint against the current terrain estimate. It is not a terrain
+lookahead planner and does not prove clearance over the entire future
+corridor. A ground-level cue altitude is denied before acceptance, or aborts
+during execution, unless it satisfies the active clearance policy.
+
+`MAV_M_INT_CLR=-1` is an explicit externally surveyed corridor override for an
+aircraft that cannot provide terrain/HAGL. It disables only these terrain-data
+and clearance checks and logs the override when used. It does not auto-accept
+a cue. Every cue still requires a new local effect-2 acceptance, and every
+source, owner, signed-link, flight-state, geofence, vertical-change, exact-hit,
+and recovery gate remains active. Use `-1` only when an external process has
+surveyed the entire approach and recovery corridor.
 
 Explicit effect `2` requires a finite cue altitude and is denied when the
 altitude is NaN. The effect selection belongs to the receiver-local acceptance
@@ -361,15 +513,17 @@ acceptance, while the vehicle is already airborne, armed, and in Hold
 showing no landed, maybe-landed, ground-contact, or freefall condition, and
 with no active failsafe or failure-detector indication. If those conditions
 are not already true, PX4 leaves the cue Pending, returns
-`MAVLINK_M_ACK_RECEIVED` with a `movement blocked` reason, and publishes no
-motion command. The operator must make a fresh acceptance decision after the
-vehicle is ready.
+`MAVLINK_M_ACK RECEIVED` with a movement-blocked reason, and publishes no
+motion command. After the aircraft becomes safe, the operator must review and
+explicitly accept the still-pending cue again. It never starts moving
+automatically.
 
 For a finite-altitude action-2 cue, PX4 continuously rechecks the exact active
 cue, expiry, source freshness, action and intercept parameters, armed
 airborne-Hold state, failsafe/failure state, global position, vertical limit,
-and ownership of the level-entry and exact-target setpoints. While the level
-entry is active, Loiter revalidates both that endpoint and the target on every
+fresh terrain/HAGL, actual and candidate clearance, and ownership of the
+level-entry, exact-target, straight-recovery, and recovery-loiter setpoints.
+While Intercept is active, Loiter revalidates every active endpoint on every
 cycle. PX4 1.14 cannot prove that the whole fixed-wing approach corridor stays
 inside a restrictive geofence, so exact Intercept is rejected whenever an
 actual polygon, circle, `GF_MAX_HOR_DIST`, or `GF_MAX_VER_DIST` restriction is
@@ -377,9 +531,11 @@ configured and `GF_ACTION` is `LOITER`, `RTL`, `TERMINATE`, or `LAND`.
 PX4's default `GF_ACTION=LOITER` does not create a fence by itself and does not
 block Intercept when all four restrictions are absent. `NONE` and `WARN` allow
 Intercept with a configured fence. After crossing PX4 requires ownership of
-the promoted target-centered loiter. Task abort or expiry, mode exit, disarm, failsafe,
-source staleness, setpoint override, action or intercept-policy change, or
-restart permanently changes that acceptance to intercept phase `ABORTED`.
+the promoted target-centered loiter at acceptance-time altitude and actual
+altitude within 5 m. Task abort or expiry, mode exit, disarm, failsafe, source
+staleness, terrain/HAGL loss, clearance breach, setpoint override, action or
+intercept-policy change, or restart permanently changes that acceptance to
+intercept phase `ABORTED`.
 Restoring a gate does not resume the dwell. Restarted active assignments remain
 visible for audit but never resume the intercept.
 
@@ -387,52 +543,15 @@ visible for audit but never resume the intercept.
 `TRANSIT`, `DWELL`, `COMPLETE`, or `ABORTED`. The owner link sends
 the same numeric value as `NAMED_VALUE_INT AAGS_IPHS`.
 
-A movement cue is accepted only when PX4 can issue its requested navigation
-command at that exact instant. A failed armed, airborne, Hold, failsafe,
-position-freshness, source-freshness, or intercept-altitude gate returns
-`MAVLINK_M_ACK_RECEIVED` with a `movement blocked` reason and leaves the cue
-Pending. It does not become Active
-and cannot begin moving later after arming, takeoff, entering Hold, or
-restart/restore. The operator must make a fresh acceptance decision after the
-gate is restored. OBSERVE, MARK, handover, and receipt-only INVESTIGATE remain
-valid non-movement acceptances and do not require the flight-state gate.
-Invalid or over-permission local effects also leave the durable cue Pending and
-repeat `MAVLINK_M_ACK_RECEIVED` with the blocking reason. `FAILED`, `EXPIRED`,
-`REJECTED`, and `ACCEPTED` are emitted only when PX4's durable task state agrees
-with that result.
-
-Receiving a new cue while another cue is Active does not change either task.
-The new cue remains Pending until an explicit local acceptance. On acceptance,
-PX4 first validates the new cue and every movement gate. If it cannot execute
-the requested effect, the old cue remains Active and the new cue remains
-Pending/Received. If preflight succeeds, one durable transition marks the old
-cue Aborted and the new cue Active. A moving replacement publishes its new
-navigation command directly, without an intervening hold. A nonmoving
-replacement stops navigation issued by the old cue. PX4 then sends the old
-cue's `REJECTED` ACK with a superseded reason before sending the new cue's
-`ACCEPTED` ACK. A persistence or command-publication failure restores the old
-Active cue and leaves the new cue Pending when the replacement command was not
-published and rollback can be persisted. If command publication succeeds but
-its command-state write fails, PX4 requests a navigation stop, retains the
-durable new `Active/Received` stage, and reports that an explicit Abort is
-required. It does not falsely restore the old task after its navigation was
-replaced. If the stop publication is unconfirmed, the new command flags remain
-visible so Abort can retry it.
-
-A restart during the narrow `Active/Received` stage cannot resume movement.
-PX4 recognizes a movement task with no committed command flags, restores it as
-Pending, and requires a new explicit acceptance. If only the MAVLink module
-restarts while Navigator still holds the superseded command, PX4 recovers the
-command-bearing predecessor from the newest terminal record and retries a
-current-position stop.
-
-For movement, `ACCEPTED` proves that PX4 passed its receiver-side safety gates,
-published the navigation request, and durably recorded that publication. It
-does not promise that Navigator will remain able to complete the route after
-conditions change. A later intercept rejection, cancellation, safety-gate
-loss, or target miss remains visible as failed or aborted status. Legacy
-accepted-queue state is restored as Pending and never resumes movement without
-a fresh local decision.
+An accepted cue does not begin moving later after arming, takeoff, entering
+Hold, or restart/restore. A newly received cue may remain Pending while the
+current cue continues normally. If the operator accepts that new cue, PX4
+first durably changes the old active cue to Rejected/Aborted and sends its
+authoritative `MAVLINK_M_ACK REJECTED`, then durably accepts the new cue,
+sends its `MAVLINK_M_ACK ACCEPTED`, and makes it the sole active assignment.
+If the replacement fails any permission or flight-state gate, the new cue
+stays Pending and the old active cue continues unchanged. Legacy
+accepted-queue state is restored as Pending.
 
 PX4 1.14 Commander requires the
 `MAV_DO_REPOSITION_FLAGS_CHANGE_MODE` bit (`param2=1`) to acknowledge
@@ -454,9 +573,12 @@ payload authority.
 This procedure requires `v1.14-CAM-MAV-M-SITL`. Two computers are not
 required. Run two AAGS processes with different MAVLink system IDs. The
 runner assigns AAGS `254/190` as the local owner of SYS44 and AAGS `253/190`
-as the local owner of SYS45. Both stations can display both vehicles, but
-instance `4` on each PX4 is telemetry-only; cueing the other station's vehicle
-directly over that observer route is deliberately rejected.
+as the local owner of SYS45. Both stations discover and display both vehicles
+through each vehicle's one Fleet route. PX4 sends receiver-confirmed cue state
+to both stations, but strict source and control selectors still reject a cue
+or owner decision from the wrong station. Start the runner with
+`AAGS_DUAL_OPEN_OWNER=1` only when the test intentionally gives both stations
+cue and owner-control authority.
 
 1. In AAGS 254, tag/select a contact and send an AAGS **Handover** to AAGS
    253.
@@ -479,9 +601,10 @@ vehicle leg, start at step 3 with any contact already stored in the owning
 AAGS.
 
 If `MAV_M_ACTION=1` or `2`, the aircraft must already be airborne, armed, safe,
-and in Hold at the instant Accept is selected. A failed motion gate declines
-the acceptance with a repeated RECEIVED result and leaves the cue Pending. PX4 never reports the movement cue as
-Accepted and never starts it later without another operator decision.
+and in Hold at the instant Accept is selected. A failed motion gate returns
+RECEIVED with the blocking reason and leaves the cue Pending. PX4 never reports
+the movement cue as Accepted and never starts it later without another
+operator decision.
 
 The repository bench sender can isolate AAGS from the test:
 
@@ -494,6 +617,12 @@ Tools/aags_mavlink_m/endpoint_tool.py \
   --lat 45.4671 --lon -73.7578 --alt 50 \
   --name ALBATROSS-731
 ```
+
+Before `TRACK_IDENTITY`, `TARGET_CUE`, or `TARGET_HANDOVER`, the tool sends a
+`MAV_TYPE_GCS` heartbeat from the configured source identity and waits 0.3
+seconds for Direct Fleet peer admission. Signed operation signs that heartbeat
+with the same key and link ID as the task. Use
+`--peer-registration-delay SECONDS` only when a slower link needs more time.
 
 For a handover, `target_set_id` is the finalized ACK correlation instance:
 
@@ -527,7 +656,22 @@ reboot
 ```
 
 Both selected physical links then reject unsigned frames and sign their
-outbound ACK/status traffic. The two signing link IDs must differ.
+outbound ACK/status traffic. Each incoming cue-side message must carry
+`MAV_M_LNK_ID` in signature byte zero. Each owner decision must carry
+`MAV_M_CTL_LNK`. A frame signed with the correct key but the wrong link ID is
+denied. The two signing link IDs must differ.
+
+Mode 2 is fail closed during cold start. A selected physical route remains
+locked before any decoded frame can reach task, ESAD, command, mission,
+parameter, FTP, timesync, RC, manual-control, or forwarding handlers until
+both the transmitter and receiver parser own active signing contexts. A
+missing or permission-invalid key, or a real-time clock at or before the
+MAVLink signing epoch, keeps the route locked. PX4 retries key and clock
+activation once per second, so installing a valid owner-only key and obtaining
+valid UTC unlocks the signed route without a reboot. It never falls back to
+unsigned traffic. The locked route also drops `TIMESYNC`, so cold-start UTC
+must come from GPS, an RTC, or a separate MAVLink route that is not protected
+by this mode-2 endpoint.
 
 In same-endpoint mode, both parameters identify the one physical route and
 must match:
@@ -541,7 +685,45 @@ param save
 reboot
 ```
 
+## ESAD ingress and forwarding
+
+`ESAD_ARMING` and `ESAD_CONFIG` are targetless safety-critical messages. PX4
+accepts them only on `MAV_M_INST` from an endpoint authorized by the selected
+Direct or Gateway mode, with a source matching `MAV_M_CTL_SYS/CMP`. Signed mode
+also requires signature byte zero to equal `MAV_M_CTL_LNK`. Unauthorized forms
+are consumed and cannot fall through to generic MAVLink forwarding.
+
+`MAV_M_ESAD_I` selects the outbound MAVLink instance for both messages. The
+receiving `MAV_M_INST` and selected output instance must have forwarding
+enabled. The forwarded object retains its complete original MAVLink 2
+signature. An explicit output must be a distinct running instance. Invalid,
+self, unavailable, or forwarding-disabled outputs drop the command. The first
+authorized ESAD control frame after boot reaches the explicit output without
+requiring prior traffic from the ESAD component. `ESAD_STATE` keeps normal
+return forwarding behavior.
+
 ## Verification
+
+Run the local policy suites before building firmware:
+
+```sh
+python3 Tools/aags_mavlink_m/test_udp_peer_policy.py
+python3 Tools/aags_mavlink_m/test_intercept_policy.py
+```
+
+For a direct-mode bench check, set `MAV_M_PEERS=4`, connect two AAGS stations
+with unique system IDs, and wait for both to send heartbeats. `mavlink status`
+must show two live `GCS ...` rows. Send and accept one vehicle cue. Both
+stations must receive the receiver-confirmed active state, but only a station
+matching `MAV_M_CTL_SYS/CMP` may issue Accept, Reject, or Abort. Stop one AAGS
+for longer than `MAV_M_P_TMO`; its row must disappear and the expiration
+counter must increment.
+
+For a duplicate check, start a second process with a GCS system/component ID
+already live at another address or source port. PX4 must retain the first row,
+reject the duplicate, and increment `conflicts`. For a gateway check, set
+`MAV_M_PEERS=0` and reboot. `mavlink status` must show `0/0` fleet peers while
+the configured pinned partner still receives the normal MAVLink stream.
 
 The conformance source is portable. The command below uses the SITL branch or
 another configured host test build:
@@ -557,3 +739,19 @@ build/px4_sitl_default/mavlink_m_conformance_test --golden
 
 The generated cue, handover, and ACK frames must be byte-identical to AAGS
 `mavlink-m/golden/workflow-frames.json`.
+
+Run the full SITL acceptance sequence once in unsigned lab mode and once with
+MAVLink 2 signing:
+
+```sh
+python3 Tools/aags_mavlink_m/run_sitl_acceptance.py \
+  --json-output /tmp/mavlink-m-v114-unsigned.json
+
+python3 Tools/aags_mavlink_m/run_sitl_acceptance.py \
+  --signed \
+  --json-output /tmp/mavlink-m-v114-signed.json
+```
+
+The signed run creates an owner-only temporary key inside its isolated rootfs.
+Identity conflicts at an already registered UDP tuple must be silently dropped
+by the route-wide provenance gate and must not produce `COMMAND_ACK`.
