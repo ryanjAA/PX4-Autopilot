@@ -97,10 +97,19 @@ mavlink_message_t *mavlink_get_channel_buffer(uint8_t channel) { return mavlink_
 static void usage();
 
 #if defined(MAVLINK_MSG_ID_ESAD_ARMING)
+static constexpr bool is_esad_forwarded_control_message(uint32_t message_id)
+{
+	return message_id == MAVLINK_MSG_ID_ESAD_ARMING
+#if defined(MAVLINK_MSG_ID_ESAD_CONFIG)
+	       || message_id == MAVLINK_MSG_ID_ESAD_CONFIG
+#endif
+	       ;
+}
+
 static constexpr bool esad_forwarding_instance_selected(uint32_t message_id, int selected_instance,
 		int destination_instance)
 {
-	return message_id != MAVLINK_MSG_ID_ESAD_ARMING
+	return !is_esad_forwarded_control_message(message_id)
 	       || selected_instance == -1
 	       || selected_instance == destination_instance;
 }
@@ -111,6 +120,12 @@ static_assert(esad_forwarding_instance_selected(MAVLINK_MSG_ID_ESAD_ARMING, 2, 2
 	      "ESAD_ARMING must reach the selected MAVLink instance");
 static_assert(!esad_forwarding_instance_selected(MAVLINK_MSG_ID_ESAD_ARMING, 2, 1),
 	      "ESAD_ARMING must not reach an unselected MAVLink instance");
+#if defined(MAVLINK_MSG_ID_ESAD_CONFIG)
+static_assert(esad_forwarding_instance_selected(MAVLINK_MSG_ID_ESAD_CONFIG, 2, 2),
+	      "ESAD_CONFIG must reach the selected MAVLink instance");
+static_assert(!esad_forwarding_instance_selected(MAVLINK_MSG_ID_ESAD_CONFIG, 2, 1),
+	      "ESAD_CONFIG must not reach an unselected MAVLink instance");
+#endif
 #if defined(MAVLINK_MSG_ID_ESAD_STATE)
 static_assert(esad_forwarding_instance_selected(MAVLINK_MSG_ID_ESAD_STATE, 2, 1),
 	      "ESAD_STATE must retain standard forwarding");
@@ -536,6 +551,17 @@ Mavlink::component_was_seen(int system_id, int component_id, Mavlink *self)
 	return false;
 }
 
+int
+Mavlink::get_esad_arming_forwarding_instance() const
+{
+	// The normal parameter-update subscription is rate limited. ESAD output
+	// selection is a safety boundary, so read the authoritative value for every
+	// rare control frame. A read failure returns an invalid selector.
+	int32_t selected_instance = -2;
+	(void)param_get(_param_mav_m_esad_i.handle(), &selected_instance);
+	return selected_instance;
+}
+
 void
 Mavlink::forward_message(const mavlink_message_t *msg, Mavlink *self)
 {
@@ -546,6 +572,19 @@ Mavlink::forward_message(const mavlink_message_t *msg, Mavlink *self)
 
 #if defined(MAVLINK_MSG_ID_ESAD_ARMING)
 	const int selected_esad_instance = self->get_esad_arming_forwarding_instance();
+	const bool selected_esad_control = is_esad_forwarded_control_message(msg->msgid)
+					   && selected_esad_instance >= 0;
+
+	if (is_esad_forwarded_control_message(msg->msgid)
+	    && (selected_esad_instance < -1 || selected_esad_instance >= MAVLINK_COMM_NUM_BUFFERS)) {
+		PX4_ERR("ESAD control dropped: invalid output instance %d", selected_esad_instance);
+		return;
+	}
+
+	if (selected_esad_control && selected_esad_instance == self->get_instance_id()) {
+		PX4_ERR("ESAD control dropped: output instance %d is the ingress", selected_esad_instance);
+		return;
+	}
 #endif
 
 	// might be nullptr if message is unknown
@@ -572,12 +611,25 @@ Mavlink::forward_message(const mavlink_message_t *msg, Mavlink *self)
 
 	LockGuard lg{mavlink_module_mutex};
 
+#if defined(MAVLINK_MSG_ID_ESAD_ARMING)
+	bool selected_esad_forwarded = false;
+#endif
+
 	for (Mavlink *inst : mavlink_module_instances) {
 		if (inst && (inst != self) && (inst->get_forwarding_on())) {
 #if defined(MAVLINK_MSG_ID_ESAD_ARMING)
-			// MAV_M_ESAD_I changes only ESAD_ARMING fanout. ESAD_STATE
-			// return traffic and every other message keep standard forwarding.
+			// MAV_M_ESAD_I selects the authenticated ESAD_ARMING and
+			// ESAD_CONFIG output. ESAD_STATE and other traffic keep standard
+			// forwarding.
 			if (!esad_forwarding_instance_selected(msg->msgid, selected_esad_instance, inst->get_instance_id())) {
+				continue;
+			}
+
+			// An explicit ESAD output is a physical route. Targetless ESAD
+			// control must not depend on prior component discovery.
+			if (selected_esad_control) {
+				inst->pass_message(msg);
+				selected_esad_forwarded = true;
 				continue;
 			}
 #endif
@@ -588,6 +640,13 @@ Mavlink::forward_message(const mavlink_message_t *msg, Mavlink *self)
 			}
 		}
 	}
+
+#if defined(MAVLINK_MSG_ID_ESAD_ARMING)
+	if (selected_esad_control && !selected_esad_forwarded) {
+		PX4_ERR("ESAD control dropped: output instance %d is unavailable or forwarding is off",
+			selected_esad_instance);
+	}
+#endif
 }
 
 int
@@ -832,6 +891,259 @@ Mavlink::get_free_tx_buf()
 	return buf_free;
 }
 
+#if defined(MAVLINK_UDP) && defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+bool Mavlink::udp_endpoints_equal(const sockaddr_in &first, const sockaddr_in &second)
+{
+	return first.sin_family == second.sin_family
+	       && first.sin_addr.s_addr == second.sin_addr.s_addr
+	       && first.sin_port == second.sin_port;
+}
+
+uint32_t Mavlink::message_id_from_wire_packet(const uint8_t *buffer, unsigned length)
+{
+	if (buffer == nullptr || length == 0) {
+		return UINT32_MAX;
+	}
+
+	if (buffer[0] == MAVLINK_STX && length >= 10) {
+		return static_cast<uint32_t>(buffer[7])
+		       | (static_cast<uint32_t>(buffer[8]) << 8U)
+		       | (static_cast<uint32_t>(buffer[9]) << 16U);
+	}
+
+	if (buffer[0] == MAVLINK_STX_MAVLINK1 && length >= 6) {
+		return buffer[5];
+	}
+
+	return UINT32_MAX;
+}
+
+unsigned Mavlink::mavlink_m_udp_peer_count() const
+{
+	unsigned count = 0;
+
+	for (const MavlinkMUdpPeer &peer : _mavlink_m_udp_peers) {
+		if (peer.last_heartbeat != 0) {
+			++count;
+		}
+	}
+
+	return count;
+}
+
+void Mavlink::expire_mavlink_m_udp_peers(hrt_abstime now)
+{
+	if (_mavlink_m_udp_peer_mode != MavlinkMUdpPeerMode::Direct
+	    || _mavlink_m_udp_peer_timeout == 0) {
+		return;
+	}
+
+	for (MavlinkMUdpPeer &peer : _mavlink_m_udp_peers) {
+		if (peer.last_heartbeat != 0 && now > peer.last_heartbeat
+		    && now - peer.last_heartbeat > _mavlink_m_udp_peer_timeout) {
+			peer = MavlinkMUdpPeer{};
+			++_mavlink_m_udp_peer_expirations;
+		}
+	}
+}
+
+void Mavlink::configure_mavlink_m_udp_peers(bool enabled, unsigned peer_limit,
+
+		hrt_abstime timeout)
+{
+	peer_limit = math::constrain(peer_limit, 0U, MavlinkMUdpPeerCapacity);
+	timeout = math::constrain(timeout, static_cast<hrt_abstime>(5_s), static_cast<hrt_abstime>(300_s));
+
+	pthread_mutex_lock(&_send_mutex);
+
+	if (!enabled) {
+		for (MavlinkMUdpPeer &peer : _mavlink_m_udp_peers) {
+			peer = MavlinkMUdpPeer{};
+		}
+
+		_mavlink_m_udp_peer_mode = MavlinkMUdpPeerMode::Disabled;
+		_mavlink_m_udp_peer_limit = 0;
+		_mavlink_m_udp_peer_timeout = timeout;
+		pthread_mutex_unlock(&_send_mutex);
+		return;
+	}
+
+	if (peer_limit == 0) {
+		for (MavlinkMUdpPeer &peer : _mavlink_m_udp_peers) {
+			peer = MavlinkMUdpPeer{};
+		}
+
+		_mavlink_m_udp_peer_mode = MavlinkMUdpPeerMode::Gateway;
+		_mavlink_m_udp_peer_limit = 0;
+		_mavlink_m_udp_peer_timeout = timeout;
+		pthread_mutex_unlock(&_send_mutex);
+		return;
+	}
+
+	_mavlink_m_udp_peer_mode = MavlinkMUdpPeerMode::Direct;
+	_mavlink_m_udp_peer_timeout = timeout;
+
+	if (peer_limit < _mavlink_m_udp_peer_limit) {
+		for (unsigned index = peer_limit; index < MavlinkMUdpPeerCapacity; ++index) {
+			_mavlink_m_udp_peers[index] = MavlinkMUdpPeer{};
+		}
+	}
+
+	_mavlink_m_udp_peer_limit = static_cast<uint8_t>(peer_limit);
+	expire_mavlink_m_udp_peers(hrt_absolute_time());
+	pthread_mutex_unlock(&_send_mutex);
+}
+
+bool Mavlink::register_mavlink_m_udp_peer(const sockaddr_in &address,
+
+		uint8_t system_id, uint8_t component_id)
+{
+	if (address.sin_family != AF_INET || address.sin_addr.s_addr == INADDR_ANY
+	    || address.sin_port == 0 || system_id == 0 || component_id == 0) {
+		return false;
+	}
+
+	const hrt_abstime now = hrt_absolute_time();
+	pthread_mutex_lock(&_send_mutex);
+
+	if (_mavlink_m_udp_peer_mode != MavlinkMUdpPeerMode::Direct
+	    || _mavlink_m_udp_peer_limit == 0) {
+		pthread_mutex_unlock(&_send_mutex);
+		return false;
+	}
+
+	expire_mavlink_m_udp_peers(now);
+	MavlinkMUdpPeer *free_peer = nullptr;
+
+	for (unsigned index = 0; index < _mavlink_m_udp_peer_limit; ++index) {
+		MavlinkMUdpPeer &peer = _mavlink_m_udp_peers[index];
+
+		if (peer.last_heartbeat == 0) {
+			if (free_peer == nullptr) {
+				free_peer = &peer;
+			}
+
+			continue;
+		}
+
+		const bool same_identity = peer.system_id == system_id
+					   && peer.component_id == component_id;
+		const bool same_endpoint = udp_endpoints_equal(peer.address, address);
+
+		if (same_identity && same_endpoint) {
+			peer.last_heartbeat = now;
+			pthread_mutex_unlock(&_send_mutex);
+			return true;
+		}
+
+		if (same_identity || same_endpoint) {
+			++_mavlink_m_udp_peer_conflicts;
+			const sockaddr_in conflicting_address = peer.address;
+			const uint8_t conflicting_system_id = peer.system_id;
+			const uint8_t conflicting_component_id = peer.component_id;
+			const bool warn = _mavlink_m_udp_peer_last_conflict_warning == 0
+					  || now - _mavlink_m_udp_peer_last_conflict_warning >= 5_s;
+
+			if (warn) {
+				_mavlink_m_udp_peer_last_conflict_warning = now;
+			}
+
+			pthread_mutex_unlock(&_send_mutex);
+
+			if (warn) {
+				char incoming_ip[INET_ADDRSTRLEN] {};
+				char conflicting_ip[INET_ADDRSTRLEN] {};
+				(void)inet_ntop(AF_INET, &address.sin_addr,
+						incoming_ip, sizeof(incoming_ip));
+				(void)inet_ntop(AF_INET, &conflicting_address.sin_addr,
+						conflicting_ip, sizeof(conflicting_ip));
+				PX4_WARN("MAV-M peer conflict: %u/%u %s:%u vs %u/%u %s:%u",
+					 system_id, component_id, incoming_ip, ntohs(address.sin_port),
+					 conflicting_system_id, conflicting_component_id,
+					 conflicting_ip, ntohs(conflicting_address.sin_port));
+			}
+
+			return false;
+		}
+	}
+
+	if (free_peer == nullptr) {
+		++_mavlink_m_udp_peer_capacity_rejections;
+		const bool warn = _mavlink_m_udp_peer_last_full_warning == 0
+				  || now - _mavlink_m_udp_peer_last_full_warning >= 5_s;
+
+		if (warn) {
+			_mavlink_m_udp_peer_last_full_warning = now;
+		}
+
+		pthread_mutex_unlock(&_send_mutex);
+
+		if (warn) {
+			PX4_WARN("MAVLink-M UDP peer table full; GCS %u/%u rejected", system_id, component_id);
+		}
+
+		return false;
+	}
+
+	free_peer->address = address;
+	free_peer->last_heartbeat = now;
+	free_peer->system_id = system_id;
+	free_peer->component_id = component_id;
+	++_mavlink_m_udp_peer_registrations;
+	pthread_mutex_unlock(&_send_mutex);
+
+	PX4_INFO("MAVLink-M UDP peer GCS %u/%u registered from %s:%u",
+		 system_id, component_id, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
+	return true;
+}
+
+bool Mavlink::mavlink_m_udp_provenance_managed()
+{
+	pthread_mutex_lock(&_send_mutex);
+	const bool managed = _mavlink_m_udp_peer_mode != MavlinkMUdpPeerMode::Disabled;
+	pthread_mutex_unlock(&_send_mutex);
+	return managed;
+}
+
+bool Mavlink::mavlink_m_udp_ingress_authorized(const sockaddr_in &address,
+
+		uint8_t system_id, uint8_t component_id)
+{
+	if (address.sin_family != AF_INET || address.sin_addr.s_addr == INADDR_ANY
+	    || address.sin_port == 0 || system_id == 0 || component_id == 0) {
+		return false;
+	}
+
+	const hrt_abstime now = hrt_absolute_time();
+	pthread_mutex_lock(&_send_mutex);
+	bool authorized = false;
+
+	if (_mavlink_m_udp_peer_mode == MavlinkMUdpPeerMode::Gateway) {
+		authorized = _src_addr_explicitly_configured
+			     && _src_addr_initialized
+			     && udp_endpoints_equal(address, _src_addr);
+
+	} else if (_mavlink_m_udp_peer_mode == MavlinkMUdpPeerMode::Direct) {
+		expire_mavlink_m_udp_peers(now);
+
+		for (unsigned index = 0; index < _mavlink_m_udp_peer_limit; ++index) {
+			const MavlinkMUdpPeer &peer = _mavlink_m_udp_peers[index];
+
+			if (peer.last_heartbeat != 0
+			    && peer.system_id == system_id
+			    && peer.component_id == component_id
+			    && udp_endpoints_equal(peer.address, address)) {
+				authorized = true;
+				break;
+			}
+		}
+	}
+
+	pthread_mutex_unlock(&_send_mutex);
+	return authorized;
+}
+#endif // MAVLINK_UDP && CONFIG_MAVLINK_M_PRIVATE_PROFILE
+
 void Mavlink::send_start(int length)
 {
 	pthread_mutex_lock(&_send_mutex);
@@ -869,19 +1181,87 @@ void Mavlink::send_finish()
 #if defined(MAVLINK_UDP)
 
 	else if (get_protocol() == Protocol::UDP) {
+		bool primary_destination_sent = false;
 
 # if defined(CONFIG_NET)
 
 		if (_src_addr_initialized) {
 # endif // CONFIG_NET
 			ret = sendto(_socket_fd, _buf, _buf_fill, 0, (struct sockaddr *)&_src_addr, sizeof(_src_addr));
+			primary_destination_sent = ret == static_cast<int>(_buf_fill);
 # if defined(CONFIG_NET)
 		}
 
 # endif // CONFIG_NET
 
-		if ((_mode != MAVLINK_MODE_ONBOARD) && broadcast_enabled() &&
-		    (!get_client_source_initialized() || !is_gcs_connected())) {
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+		if (_mavlink_m_udp_peer_mode == MavlinkMUdpPeerMode::Direct) {
+			expire_mavlink_m_udp_peers(hrt_absolute_time());
+
+			for (unsigned index = 0; index < _mavlink_m_udp_peer_limit; ++index) {
+				const MavlinkMUdpPeer &peer = _mavlink_m_udp_peers[index];
+
+				if (peer.last_heartbeat == 0
+				    || (primary_destination_sent && udp_endpoints_equal(peer.address, _src_addr))) {
+					continue;
+				}
+
+				const int peer_ret = sendto(_socket_fd, _buf, _buf_fill, 0,
+							    (const struct sockaddr *)&peer.address, sizeof(peer.address));
+
+				if (peer_ret != static_cast<int>(_buf_fill)) {
+					++_mavlink_m_udp_peer_send_errors;
+
+				} else {
+					++_mavlink_m_udp_peer_fanout_copies;
+					_mavlink_m_udp_peer_fanout_bytes += static_cast<uint64_t>(peer_ret);
+
+					if (ret < 0) {
+						ret = peer_ret;
+					}
+				}
+			}
+		}
+#endif // CONFIG_MAVLINK_M_PRIVATE_PROFILE
+
+		const bool legacy_broadcast =
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+			_mavlink_m_udp_peer_mode == MavlinkMUdpPeerMode::Disabled
+			&&
+#endif
+			broadcast_enabled()
+			&& (!get_client_source_initialized() || !is_gcs_connected());
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+		// Continue a low-rate discovery beacon after the first station has
+		// connected. Only HEARTBEAT is broadcast here; task and telemetry frames
+		// remain unicast to validated learned peers.
+		// A loopback partner is a same-host lab. Broadcasting there creates a
+		// second LAN-address alias for the same GCS socket and correctly trips
+		// exact-endpoint conflict protection. Same-host labs already use seeds.
+		bool loopback_partner = _src_addr_initialized
+					&& (ntohl(_src_addr.sin_addr.s_addr) >> 24U) == 127U;
+
+		if (!loopback_partner && _mavlink_m_udp_peer_mode == MavlinkMUdpPeerMode::Direct) {
+			for (unsigned index = 0; index < _mavlink_m_udp_peer_limit; ++index) {
+				const MavlinkMUdpPeer &peer = _mavlink_m_udp_peers[index];
+
+				if (peer.last_heartbeat != 0
+				    && (ntohl(peer.address.sin_addr.s_addr) >> 24U) == 127U) {
+					loopback_partner = true;
+					break;
+				}
+			}
+		}
+		const bool fleet_discovery_heartbeat = _mavlink_m_udp_peer_mode == MavlinkMUdpPeerMode::Direct
+				&& _mavlink_m_udp_peer_limit > 1
+				&& !loopback_partner
+				&& message_id_from_wire_packet(_buf, _buf_fill) == MAVLINK_MSG_ID_HEARTBEAT;
+#else
+		const bool fleet_discovery_heartbeat = false;
+#endif
+
+		if (((_mode != MAVLINK_MODE_ONBOARD) && legacy_broadcast)
+		    || fleet_discovery_heartbeat) {
 
 			if (!_broadcast_address_found) {
 				find_broadcast_address();
@@ -1332,11 +1712,11 @@ Mavlink::configure_stream_threadsafe(const char *stream_name, const float rate)
 void
 Mavlink::pass_message(const mavlink_message_t *msg)
 {
-	/* size is 12 bytes plus variable payload */
-	int size = MAVLINK_NUM_NON_PAYLOAD_BYTES + msg->len;
 	LockGuard lg{_message_buffer_mutex};
 
-	if (!_message_buffer.push_back(reinterpret_cast<const uint8_t *>(msg), size)) {
+	// The signature follows the fixed-size payload array in mavlink_message_t.
+	// Copy the complete parsed object so signed forwarding remains verifiable.
+	if (!_message_buffer.push_back(reinterpret_cast<const uint8_t *>(msg), sizeof(*msg))) {
 		perf_count(_forwarding_error_perf);
 	}
 }
@@ -1997,6 +2377,7 @@ Mavlink::task_main(int argc, char *argv[])
 
 			if (inet_aton(myoptarg, &_src_addr.sin_addr)) {
 				_src_addr_initialized = true;
+				_src_addr_explicitly_configured = true;
 
 			} else {
 				PX4_ERR("invalid partner ip '%s'", myoptarg);
@@ -2014,6 +2395,7 @@ Mavlink::task_main(int argc, char *argv[])
 		// multicast
 		case 'c':
 			_src_addr.sin_family = AF_INET;
+			_src_addr_explicitly_configured = false;
 
 			if (inet_aton(myoptarg, &_src_addr.sin_addr)) {
 				_src_addr_initialized = true;
@@ -2969,7 +3351,7 @@ Mavlink::display_status()
 	switch (_protocol) {
 #if defined(MAVLINK_UDP)
 
-	case Protocol::UDP:
+	case Protocol::UDP: {
 		printf("UDP (%hu, remote port: %hu)\n", _network_port, _remote_port);
 		printf("\tBroadcast enabled: %s\n",
 		       broadcast_enabled() ? "YES" : "NO");
@@ -2984,7 +3366,42 @@ Mavlink::display_status()
 		}
 
 #endif
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+		pthread_mutex_lock(&_send_mutex);
+		expire_mavlink_m_udp_peers(hrt_absolute_time());
+		const char *peer_mode = _mavlink_m_udp_peer_mode == MavlinkMUdpPeerMode::Direct ? "direct"
+				: (_mavlink_m_udp_peer_mode == MavlinkMUdpPeerMode::Gateway ? "gateway" : "disabled");
+		printf("\tMAVLink-M fleet peers: %u/%u, mode %s, timeout %.1f s\n",
+		       mavlink_m_udp_peer_count(), static_cast<unsigned>(_mavlink_m_udp_peer_limit),
+		       peer_mode, static_cast<double>(_mavlink_m_udp_peer_timeout) / 1e6);
+
+		if (_mavlink_m_udp_peer_mode == MavlinkMUdpPeerMode::Gateway) {
+			printf("\t  explicit gateway partner: %s\n",
+			       _src_addr_explicitly_configured ? "configured" : "missing; protected ingress denied");
+		}
+
+		for (unsigned index = 0; index < _mavlink_m_udp_peer_limit; ++index) {
+			const MavlinkMUdpPeer &peer = _mavlink_m_udp_peers[index];
+
+			if (peer.last_heartbeat != 0) {
+				printf("\t  GCS %u/%u %s:%u age %.1f s\n",
+				       peer.system_id, peer.component_id, inet_ntoa(peer.address.sin_addr),
+				       ntohs(peer.address.sin_port),
+				       static_cast<double>(hrt_elapsed_time(&peer.last_heartbeat)) / 1e6);
+			}
+		}
+
+		printf("\t  registrations: %" PRIu32 ", expired: %" PRIu32
+		       ", conflicts: %" PRIu32 ", full: %" PRIu32 ", send errors: %" PRIu32
+		       ", fanout copies: %" PRIu64 ", fanout bytes: %" PRIu64 "\n",
+		       _mavlink_m_udp_peer_registrations, _mavlink_m_udp_peer_expirations,
+		       _mavlink_m_udp_peer_conflicts, _mavlink_m_udp_peer_capacity_rejections,
+		       _mavlink_m_udp_peer_send_errors, _mavlink_m_udp_peer_fanout_copies,
+		       _mavlink_m_udp_peer_fanout_bytes);
+		pthread_mutex_unlock(&_send_mutex);
+#endif // CONFIG_MAVLINK_M_PRIVATE_PROFILE
 		break;
+	}
 #endif // MAVLINK_UDP
 
 	case Protocol::SERIAL:

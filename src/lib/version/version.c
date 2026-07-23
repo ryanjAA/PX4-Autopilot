@@ -354,12 +354,14 @@ const char *px4_ecl_lib_version_string(void)
 #endif
 }
 
-#ifdef MAVLINK_LIB_GIT_VERSION_BINARY
 uint64_t px4_mavlink_lib_version_binary(void)
 {
+#ifdef MAVLINK_LIB_GIT_VERSION_BINARY
 	return MAVLINK_LIB_GIT_VERSION_BINARY;
+#else
+	return 0;
+#endif
 }
-#endif /* MAVLINK_LIB_GIT_VERSION_BINARY */
 
 uint64_t px4_os_version_binary(void)
 {
@@ -374,4 +376,3 @@ const char *px4_firmware_oem_version_string(void)
 {
 	return PX4_GIT_OEM_VERSION_STR;
 }
-

@@ -294,6 +294,23 @@ public:
 	bool			broadcast_enabled() { return _mav_broadcast == BROADCAST_MODE_ON; }
 
 	bool			multicast_enabled() { return _mav_broadcast == BROADCAST_MODE_MULTICAST; }
+
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	/**
+	 * Configure the bounded set of AAGS UDP peers for this MAVLink instance.
+	 * A disabled configuration or zero limit immediately forgets every learned
+	 * endpoint. The separately configured -t partner remains untouched.
+	 */
+	void			configure_mavlink_m_udp_peers(bool enabled, unsigned peer_limit,
+						      hrt_abstime timeout);
+
+	/**
+	 * Register or refresh a validated AAGS GCS heartbeat source. Returns false
+	 * when the table is full or a live identity/endpoint conflict is detected.
+	 */
+	bool			register_mavlink_m_udp_peer(const sockaddr_in &address,
+						    uint8_t system_id, uint8_t component_id);
+#endif // CONFIG_MAVLINK_M_PRIVATE_PROFILE
 #endif // MAVLINK_UDP
 
 	/**
@@ -351,7 +368,7 @@ public:
 	void			handle_message(const mavlink_message_t *msg);
 
 	int			get_instance_id() const { return _instance_id; }
-	int			get_esad_arming_forwarding_instance() const { return _param_mav_m_esad_i.get(); }
+	int			get_esad_arming_forwarding_instance() const;
 
 	/**
 	 * Enable / disable hardware flow control.
@@ -466,6 +483,12 @@ public:
 	void			set_client_source_initialized() { _src_addr_initialized = true; }
 
 	bool			get_client_source_initialized() { return _src_addr_initialized; }
+
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	bool			mavlink_m_udp_provenance_managed();
+	bool			mavlink_m_udp_ingress_authorized(const sockaddr_in &address,
+						 uint8_t system_id, uint8_t component_id);
+#endif
 #endif
 
 	uint64_t		get_start_time() { return _mavlink_start_time; }
@@ -624,12 +647,49 @@ private:
 	sockaddr_in		_bcast_addr {};
 
 	bool			_src_addr_initialized{false};
+	bool			_src_addr_explicitly_configured{false};
 	bool			_broadcast_address_found{false};
 	bool			_broadcast_address_not_found_warned{false};
 	bool			_broadcast_failed_warned{false};
 
 	unsigned short		_network_port{14556};
 	unsigned short		_remote_port{DEFAULT_REMOTE_PORT_UDP};
+
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	static constexpr unsigned MavlinkMUdpPeerCapacity = 8;
+
+	struct MavlinkMUdpPeer {
+		sockaddr_in address{};
+		hrt_abstime last_heartbeat{0};
+		uint8_t system_id{0};
+		uint8_t component_id{0};
+	};
+
+	enum class MavlinkMUdpPeerMode : uint8_t {
+		Disabled = 0,
+		Direct,
+		Gateway
+	};
+
+	static bool		udp_endpoints_equal(const sockaddr_in &first, const sockaddr_in &second);
+	static uint32_t		message_id_from_wire_packet(const uint8_t *buffer, unsigned length);
+	void			expire_mavlink_m_udp_peers(hrt_abstime now);
+	unsigned		mavlink_m_udp_peer_count() const;
+
+	MavlinkMUdpPeer		_mavlink_m_udp_peers[MavlinkMUdpPeerCapacity] {};
+	MavlinkMUdpPeerMode	_mavlink_m_udp_peer_mode{MavlinkMUdpPeerMode::Disabled};
+	uint8_t			_mavlink_m_udp_peer_limit{0};
+	hrt_abstime		_mavlink_m_udp_peer_timeout{30_s};
+	uint32_t		_mavlink_m_udp_peer_registrations{0};
+	uint32_t		_mavlink_m_udp_peer_expirations{0};
+	uint32_t		_mavlink_m_udp_peer_conflicts{0};
+	uint32_t		_mavlink_m_udp_peer_capacity_rejections{0};
+	uint32_t		_mavlink_m_udp_peer_send_errors{0};
+	uint64_t		_mavlink_m_udp_peer_fanout_copies{0};
+	uint64_t		_mavlink_m_udp_peer_fanout_bytes{0};
+	hrt_abstime		_mavlink_m_udp_peer_last_conflict_warning{0};
+	hrt_abstime		_mavlink_m_udp_peer_last_full_warning{0};
+#endif // CONFIG_MAVLINK_M_PRIVATE_PROFILE
 #endif // MAVLINK_UDP
 
 	uint8_t			_buf[MAVLINK_MAX_PACKET_LEN] {};

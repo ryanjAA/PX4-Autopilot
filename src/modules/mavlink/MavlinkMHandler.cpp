@@ -67,6 +67,8 @@ constexpr uint64_t MavlinkSigningEpochSeconds = 1'420'070'400ULL;
 constexpr int32_t ActionReceiptOnly = 0;
 constexpr int32_t ActionRepositionCurrentAltitude = 1;
 constexpr int32_t ActionInterceptCueAltitude = 2;
+constexpr int32_t MaximumUdpPeerLimit = 8;
+constexpr int32_t DefaultUdpPeerTimeoutS = 30;
 constexpr uint16_t OwnerDecisionCommand = MAV_CMD_USER_1;
 constexpr uint8_t OwnerDecisionAccept = 1;
 constexpr uint8_t OwnerDecisionReject = 2;
@@ -79,10 +81,12 @@ constexpr float RepositionChangeModeFlag = 1.f;
 constexpr float DefaultInterceptRadiusM = 25.f;
 constexpr float DefaultInterceptDwellS = 3.f;
 constexpr float DefaultInterceptDeltaZM = 100.f;
+constexpr float DefaultInterceptClearanceM = 30.f;
 constexpr float DefaultLoiterRadiusM = 80.f;
 constexpr float FixedWingLoiterMarginM = 10.f;
 constexpr float SetpointHorizontalToleranceM = 2.f;
 constexpr float SetpointAltitudeToleranceM = 1.f;
+constexpr float RecoveryAltitudeToleranceM = 5.f;
 constexpr hrt_abstime SetpointApplyTimeout = 2'000'000;
 constexpr hrt_abstime CompletionAckTimeout = 500'000;
 constexpr uint32_t InterceptTokenMaximum = INT32_MAX;
@@ -95,12 +99,16 @@ constexpr uint8_t TargetCueRequiredWireLength =
 	static_cast<uint8_t>(offsetof(mavlink_target_cue_t, cue_type));
 constexpr uint8_t TargetHandoverRequiredWireLength =
 	static_cast<uint8_t>(offsetof(mavlink_target_handover_t, confidence_score));
-constexpr uint8_t OwnerDecisionRequiredWireLength =
-	static_cast<uint8_t>(offsetof(mavlink_command_long_t, confirmation));
+// The command field is enough to identify MAV_CMD_USER_1 as protected. A
+// truncated request is still consumed, then denied because its exact vehicle
+// target fields decode as zero. It must never fall through to generic command
+// handling merely because those required target bytes are absent.
+constexpr uint8_t OwnerDecisionCommandWireLength =
+	static_cast<uint8_t>(offsetof(mavlink_command_long_t, target_system));
 static_assert(TrackIdentityRequiredWireLength == 58, "unexpected TRACK_IDENTITY required prefix");
 static_assert(TargetCueRequiredWireLength == 45, "unexpected TARGET_CUE required prefix");
 static_assert(TargetHandoverRequiredWireLength == 76, "unexpected TARGET_HANDOVER required prefix");
-static_assert(OwnerDecisionRequiredWireLength == 32, "unexpected COMMAND_LONG required prefix");
+static_assert(OwnerDecisionCommandWireLength == 30, "unexpected COMMAND_LONG command prefix");
 
 constexpr uint8_t sanitize_action(int32_t action)
 {
@@ -128,6 +136,33 @@ constexpr uint8_t persisted_system_selector(int32_t selector)
 constexpr int32_t sanitize_max_age(int32_t maximum_age_s)
 {
 	return maximum_age_s >= 0 && maximum_age_s <= 600 ? maximum_age_s : 30;
+}
+
+constexpr int32_t sanitize_udp_peer_limit(int32_t peer_limit)
+{
+	return peer_limit >= 0 && peer_limit <= MaximumUdpPeerLimit
+	       ? peer_limit : 0;
+}
+
+constexpr int32_t sanitize_udp_peer_timeout(int32_t timeout_s)
+{
+	return timeout_s >= 5 && timeout_s <= 300
+	       ? timeout_s : DefaultUdpPeerTimeoutS;
+}
+
+constexpr bool is_esad_control_message(uint32_t message_id)
+{
+#if defined(MAVLINK_MSG_ID_ESAD_ARMING)
+	if (message_id == MAVLINK_MSG_ID_ESAD_ARMING) {
+		return true;
+	}
+#endif
+#if defined(MAVLINK_MSG_ID_ESAD_CONFIG)
+	if (message_id == MAVLINK_MSG_ID_ESAD_CONFIG) {
+		return true;
+	}
+#endif
+	return false;
 }
 
 constexpr float absolute_value(float value)
@@ -164,6 +199,12 @@ constexpr float sanitize_intercept_delta_z(float delta_z_m)
 	return delta_z_m >= 0.f && delta_z_m <= 1'000.f ? delta_z_m : DefaultInterceptDeltaZM;
 }
 
+constexpr float sanitize_intercept_clearance(float clearance_m)
+{
+	return (clearance_m >= 0.f && clearance_m <= 1'000.f) || approximately_equal(clearance_m, -1.f)
+	       ? clearance_m : DefaultInterceptClearanceM;
+}
+
 constexpr float effective_intercept_radius(float configured_radius_m, bool fixed_wing, float loiter_radius_m)
 {
 	const float fixed_wing_radius_m = absolute_value(loiter_radius_m) + FixedWingLoiterMarginM;
@@ -195,6 +236,17 @@ static_assert(sanitize_max_age(-1) == 30, "negative replay window must fail clos
 static_assert(sanitize_max_age(601) == 30, "oversized replay window must fail closed");
 static_assert(sanitize_max_age(0) == 0 && sanitize_max_age(600) == 600,
 	      "documented replay-window bounds must remain valid");
+static_assert(sanitize_udp_peer_limit(-1) == 0
+	      && sanitize_udp_peer_limit(0) == 0
+	      && sanitize_udp_peer_limit(1) == 1
+	      && sanitize_udp_peer_limit(MaximumUdpPeerLimit) == MaximumUdpPeerLimit
+	      && sanitize_udp_peer_limit(MaximumUdpPeerLimit + 1) == 0,
+	      "UDP peer limit must remain inside the fixed table");
+static_assert(sanitize_udp_peer_timeout(4) == DefaultUdpPeerTimeoutS
+	      && sanitize_udp_peer_timeout(5) == 5
+	      && sanitize_udp_peer_timeout(300) == 300
+	      && sanitize_udp_peer_timeout(301) == DefaultUdpPeerTimeoutS,
+	      "UDP peer timeout must remain bounded");
 static_assert(approximately_equal(sanitize_intercept_radius(0.f), DefaultInterceptRadiusM)
 	      && approximately_equal(sanitize_intercept_radius(500.f), 500.f),
 	      "intercept radius bounds must fail closed");
@@ -204,6 +256,12 @@ static_assert(approximately_equal(sanitize_intercept_dwell(-1.f), DefaultInterce
 static_assert(approximately_equal(sanitize_intercept_delta_z(-1.f), DefaultInterceptDeltaZM)
 	      && approximately_equal(sanitize_intercept_delta_z(1'000.f), 1'000.f),
 	      "intercept altitude-change bounds must fail closed");
+static_assert(approximately_equal(sanitize_intercept_clearance(-1.f), -1.f)
+	      && approximately_equal(sanitize_intercept_clearance(0.f), 0.f)
+	      && approximately_equal(sanitize_intercept_clearance(1'000.f), 1'000.f)
+	      && approximately_equal(sanitize_intercept_clearance(-0.5f), DefaultInterceptClearanceM)
+	      && approximately_equal(sanitize_intercept_clearance(1'001.f), DefaultInterceptClearanceM),
+	      "intercept terrain-clearance bounds must fail closed");
 static_assert(approximately_equal(effective_intercept_radius(25.f, false, 80.f), 25.f)
 	      && approximately_equal(effective_intercept_radius(25.f, true, 80.f), 90.f)
 	      && approximately_equal(effective_intercept_radius(120.f, true, 80.f), 120.f),
@@ -222,18 +280,51 @@ static_assert(!intercept_completion_allowed(true, false, true, true, true, true,
 constexpr const char *StatePath = PX4_STORAGEDIR "/mavlink_m_state.bin";
 constexpr const char *StateTempPath = PX4_STORAGEDIR "/.mavlink_m_state.tmp";
 constexpr const char *SigningKeyPath = PX4_STORAGEDIR "/mavlink_m_signing.key";
+
+bool sync_persistence_directory(const char *operation)
+{
+	const int directory_fd = ::open(PX4_STORAGEDIR, O_RDONLY | O_DIRECTORY);
+
+	if (directory_fd < 0) {
+		PX4_ERR("MAVLink-M %s directory open failed (%d)", operation, errno);
+		return false;
+	}
+
+	const bool directory_synced = fsync(directory_fd) == 0;
+	const int directory_sync_error = errno;
+	::close(directory_fd);
+
+	if (!directory_synced) {
+		PX4_ERR("MAVLink-M %s directory sync failed (%d)", operation, directory_sync_error);
+		return false;
+	}
+
+	return true;
+}
 #endif
 
 bool invalidate_persisted_state()
 {
 #ifdef PX4_STORAGEDIR
-	if (::unlink(StatePath) != 0 && errno != ENOENT) {
+	bool directory_changed = false;
+
+	if (::unlink(StatePath) == 0) {
+		directory_changed = true;
+
+	} else if (errno != ENOENT) {
 		PX4_ERR("MAVLink-M state invalidation failed (%d)", errno);
 		return false;
 	}
 
-	if (::unlink(StateTempPath) != 0 && errno != ENOENT) {
+	if (::unlink(StateTempPath) == 0) {
+		directory_changed = true;
+
+	} else if (errno != ENOENT) {
 		PX4_WARN("MAVLink-M temporary state cleanup failed (%d)", errno);
+	}
+
+	if (directory_changed && !sync_persistence_directory("state invalidation")) {
+		return false;
 	}
 #endif
 	return true;
@@ -336,6 +427,8 @@ MavlinkMHandler::MavlinkMHandler(Mavlink *mavlink) :
 	_param_control_component = param_find("MAV_M_CTL_CMP");
 	_param_control_link_id = param_find("MAV_M_CTL_LNK");
 	_param_same_endpoint = param_find("MAV_M_SAME_EP");
+	_param_peer_limit = param_find("MAV_M_PEERS");
+	_param_peer_timeout = param_find("MAV_M_P_TMO");
 	_param_rc_channel = param_find("MAV_M_RC_CH");
 	_param_rc_reject = param_find("MAV_M_RC_REJ");
 	_param_rc_accept = param_find("MAV_M_RC_ACC");
@@ -344,6 +437,7 @@ MavlinkMHandler::MavlinkMHandler(Mavlink *mavlink) :
 	_param_intercept_radius = param_find("MAV_M_INT_RAD");
 	_param_intercept_dwell = param_find("MAV_M_INT_DWL");
 	_param_intercept_delta_z = param_find("MAV_M_INT_DZ");
+	_param_intercept_clearance = param_find("MAV_M_INT_CLR");
 	_param_nav_loiter_radius = param_find("NAV_LOITER_RAD");
 	update_parameters();
 }
@@ -371,6 +465,7 @@ void MavlinkMHandler::update_parameters()
 	const float previous_intercept_radius = _intercept_radius_m;
 	const float previous_intercept_dwell = _intercept_dwell_s;
 	const float previous_intercept_delta_z = _intercept_delta_z_m;
+	const float previous_intercept_clearance = _intercept_clearance_m;
 	const float previous_nav_loiter_radius = _nav_loiter_radius_m;
 	// Clearing a persisted predecessor-stop marker must use the endpoint header
 	// that owns the currently loaded state. Do this before reading any new route
@@ -388,6 +483,25 @@ void MavlinkMHandler::update_parameters()
 	get_parameter(_param_control_component, _control_component);
 	get_parameter(_param_control_link_id, _control_link_id);
 	get_parameter(_param_same_endpoint, _same_endpoint);
+	get_parameter(_param_peer_limit, _peer_limit);
+	const int32_t requested_peer_limit = _peer_limit;
+	_peer_limit = sanitize_udp_peer_limit(requested_peer_limit);
+
+	if (requested_peer_limit != _peer_limit && _param_peer_limit != PARAM_INVALID) {
+		PX4_WARN("resetting invalid MAV_M_PEERS=%ld to %ld",
+			 static_cast<long>(requested_peer_limit), static_cast<long>(_peer_limit));
+		(void)param_set_no_notification(_param_peer_limit, &_peer_limit);
+	}
+
+	get_parameter(_param_peer_timeout, _peer_timeout_s);
+	const int32_t requested_peer_timeout = _peer_timeout_s;
+	_peer_timeout_s = sanitize_udp_peer_timeout(requested_peer_timeout);
+
+	if (requested_peer_timeout != _peer_timeout_s && _param_peer_timeout != PARAM_INVALID) {
+		PX4_WARN("resetting invalid MAV_M_P_TMO=%ld to %ld seconds",
+			 static_cast<long>(requested_peer_timeout), static_cast<long>(_peer_timeout_s));
+		(void)param_set_no_notification(_param_peer_timeout, &_peer_timeout_s);
+	}
 	get_parameter(_param_rc_channel, _rc_channel);
 	get_parameter(_param_rc_reject, _rc_reject);
 	get_parameter(_param_rc_accept, _rc_accept);
@@ -441,6 +555,17 @@ void MavlinkMHandler::update_parameters()
 	    && _param_intercept_delta_z != PARAM_INVALID) {
 		PX4_WARN("resetting invalid MAV_M_INT_DZ to %.1f m", static_cast<double>(_intercept_delta_z_m));
 		(void)param_set_no_notification(_param_intercept_delta_z, &_intercept_delta_z_m);
+	}
+
+	get_parameter(_param_intercept_clearance, _intercept_clearance_m);
+	const float requested_intercept_clearance = _intercept_clearance_m;
+	_intercept_clearance_m = sanitize_intercept_clearance(requested_intercept_clearance);
+
+	if (float_value_changed(requested_intercept_clearance, _intercept_clearance_m)
+	    && _param_intercept_clearance != PARAM_INVALID) {
+		PX4_WARN("resetting invalid MAV_M_INT_CLR to %.1f m",
+			 static_cast<double>(_intercept_clearance_m));
+		(void)param_set_no_notification(_param_intercept_clearance, &_intercept_clearance_m);
 	}
 
 	get_parameter(_param_nav_loiter_radius, _nav_loiter_radius_m);
@@ -509,6 +634,7 @@ void MavlinkMHandler::update_parameters()
 					      || float_value_changed(previous_intercept_radius, _intercept_radius_m)
 					      || float_value_changed(previous_intercept_dwell, _intercept_dwell_s)
 					      || float_value_changed(previous_intercept_delta_z, _intercept_delta_z_m)
+					      || float_value_changed(previous_intercept_clearance, _intercept_clearance_m)
 					      || float_value_changed(previous_nav_loiter_radius, _nav_loiter_radius_m);
 
 	if (_intercept_phase != InterceptPhase::None
@@ -534,13 +660,13 @@ void MavlinkMHandler::update_parameters()
 					 && _control_component == _source_component;
 	const bool exact_authority_collision = _control_system != -1 && _source_system != -1
 					       && same_authority_selector;
-	// SAME_EP is deliberately all-or-nothing. Partial overlap would make it
-	// ambiguous which endpoint owns the durable task and its authoritative ACK.
-	// Separate endpoints remain separated by their configured physical MAVLink
-	// instances. A wildcard on either route intentionally permits overlapping
-	// system identities, while the exact component and route still apply.
+	// On one multi-client physical route, the MAVLink source system/component
+	// still identifies the independent cue-source and owner-control roles. This
+	// permits any authorized station to submit while one exact station retains
+	// decision authority. On distinct routes, retain the legacy exact-identity
+	// collision check so two physical endpoints cannot claim the same authority.
 	const bool control_endpoint_relationship_valid = same_endpoint
-			? same_route && same_authority_selector
+			? same_route
 			: !same_route && !exact_authority_collision;
 	const bool control_signing_link_valid = _mode != 2
 						|| (_control_link_id >= 0 && _control_link_id <= UINT8_MAX
@@ -577,28 +703,150 @@ void MavlinkMHandler::update_parameters()
 		_rc_center_latched = false;
 	}
 
+	// A parameter update can change whether this receiver owns either route,
+	// even when the instance number itself is unchanged. Reapply the small,
+	// bounded peer configuration every time rather than risk leaving a former
+	// route in Direct or Gateway mode after an authority parameter is changed.
+	_udp_peer_configuration_dirty = true;
+
 	(void)configure_signing();
+}
+
+bool MavlinkMHandler::cue_physical_route_selected() const
+{
+	return _mavlink != nullptr && (_mode == 1 || _mode == 2)
+	       && _instance >= 0 && _instance < MAVLINK_COMM_NUM_BUFFERS
+	       && _mavlink->get_instance_id() == _instance;
+}
+
+bool MavlinkMHandler::control_physical_route_selected() const
+{
+	return _mavlink != nullptr && (_mode == 1 || _mode == 2)
+	       && _control_instance >= 0 && _control_instance < MAVLINK_COMM_NUM_BUFFERS
+	       && _mavlink->get_instance_id() == _control_instance;
+}
+
+bool MavlinkMHandler::cue_route_selected() const
+{
+	return _endpoint_configuration_valid && cue_physical_route_selected();
+}
+
+bool MavlinkMHandler::control_route_selected() const
+{
+	return _control_configuration_valid && control_physical_route_selected();
+}
+
+bool MavlinkMHandler::signing_active() const
+{
+	return _signing_ready && _mavlink != nullptr && _receiver_status != nullptr
+	       && _mavlink->get_status()->signing == &_signing
+	       && _mavlink->get_status()->signing_streams == &_signing_streams
+	       && _receiver_status->signing == &_signing
+	       && _receiver_status->signing_streams == &_signing_streams;
+}
+
+bool MavlinkMHandler::ingress_locked() const
+{
+	// A selected physical route remains claimed even when another endpoint
+	// parameter is corrupt. Invalid identity or signing-link configuration must
+	// never turn a protected physical ingress back into an ordinary command route.
+	return signing_required() && (cue_physical_route_selected() || control_physical_route_selected())
+	       && !signing_active();
+}
+
+bool MavlinkMHandler::generic_ingress_allowed(const mavlink_message_t &message,
+		bool udp_endpoint_authorized) const
+{
+	// Authorized ESAD control is deliberately received on MAV_M_INST and then
+	// forwarded to MAV_M_ESAD_I. It is the only targetless control traffic that
+	// may cross a cue route when cue and owner-control routes are separate.
+	if (is_esad_control_message(message.msgid)) {
+		return esad_control_allowed(message, udp_endpoint_authorized);
+	}
+
+	if (!cue_physical_route_selected() && !control_physical_route_selected()) {
+		return true;
+	}
+
+	// Peer discovery is handled before this gate. Cue-source task traffic and
+	// its liveness heartbeat are consumed by handle_message(). Everything that
+	// remains belongs only to the configured owner-control identity.
+	return control_enabled() && udp_endpoint_authorized
+	       && control_source_matches(message)
+	       && signing_link_matches(message, _control_link_id);
 }
 
 bool MavlinkMHandler::enabled() const
 {
-	return _mavlink != nullptr && _endpoint_configuration_valid
-	       && (_mode == 1 || _mode == 2)
-	       && _mavlink->get_instance_id() == _instance
-	       && (!signing_required() || _signing_ready);
+	return cue_route_selected() && (!signing_required() || signing_active());
 }
 
 bool MavlinkMHandler::control_enabled() const
 {
-	return _mavlink != nullptr && _control_configuration_valid
-	       && (_mode == 1 || _mode == 2)
-	       && _mavlink->get_instance_id() == _control_instance
-	       && (!signing_required() || _signing_ready);
+	return control_route_selected() && (!signing_required() || signing_active());
+}
+
+bool MavlinkMHandler::accepts_udp_peer_heartbeat(const mavlink_message_t &message) const
+{
+#if defined(MAVLINK_UDP)
+	const bool cue_route = enabled();
+	const bool control_route = control_enabled();
+	const bool cue_component = cue_route
+				   && message.compid == static_cast<uint8_t>(_source_component);
+	// ESAD control is intentionally received on the cue physical route even
+	// when cue submission and owner decisions use separate MAVLink instances.
+	const bool esad_control_on_cue_route = cue_route && _control_configuration_valid;
+	const bool control_component = (control_route || esad_control_on_cue_route)
+				       && message.compid == static_cast<uint8_t>(_control_component);
+
+	if ((!cue_route && !control_route) || _peer_limit == 0
+	    || _mavlink->get_protocol() != Protocol::UDP
+	    || message.msgid != MAVLINK_MSG_ID_HEARTBEAT
+	    || message.sysid == 0
+	    || (!cue_component && !control_component)) {
+		return false;
+	}
+
+	const bool cue_link_matches = cue_component && signing_link_matches(message, _link_id);
+	const bool control_link_matches = control_component && signing_link_matches(message, _control_link_id);
+
+	if (!cue_link_matches && !control_link_matches) {
+		return false;
+	}
+
+	mavlink_heartbeat_t heartbeat{};
+	mavlink_msg_heartbeat_decode(&message, &heartbeat);
+	return heartbeat.type == MAV_TYPE_GCS;
+#else
+	(void)message;
+	return false;
+#endif
+}
+
+void MavlinkMHandler::apply_udp_peer_configuration()
+{
+#if defined(MAVLINK_UDP)
+	if (_mavlink != nullptr) {
+		_mavlink->configure_mavlink_m_udp_peers(
+			(cue_route_selected() || control_route_selected())
+			&& _mavlink->get_protocol() == Protocol::UDP,
+			static_cast<unsigned>(_peer_limit), udp_peer_timeout());
+	}
+#endif
+	_udp_peer_configuration_dirty = false;
 }
 
 bool MavlinkMHandler::signing_required() const
 {
 	return _mode == 2;
+}
+
+bool MavlinkMHandler::signing_link_matches(const mavlink_message_t &message, int32_t expected_link_id) const
+{
+	return !signing_required()
+	       || ((message.incompat_flags & MAVLINK_IFLAG_SIGNED) != 0
+		   && expected_link_id >= 0 && expected_link_id <= UINT8_MAX
+		   && message.signature[0] == static_cast<uint8_t>(expected_link_id));
 }
 
 bool MavlinkMHandler::source_matches(const mavlink_message_t &message) const
@@ -619,45 +867,71 @@ bool MavlinkMHandler::source_recent(uint8_t source_system) const
 	       && hrt_elapsed_time(&_source_last_seen[source_system]) < SourceFreshTimeout;
 }
 
-bool MavlinkMHandler::task_message_allowed(const mavlink_message_t &message) const
+bool MavlinkMHandler::task_message_allowed(const mavlink_message_t &message,
+		bool udp_endpoint_authorized) const
 {
-	return enabled() && source_matches(message);
+	return enabled() && udp_endpoint_authorized && source_matches(message)
+	       && signing_link_matches(message, _link_id);
 }
 
-bool MavlinkMHandler::handle_message(const mavlink_message_t &message)
+bool MavlinkMHandler::esad_control_allowed(const mavlink_message_t &message,
+		bool udp_endpoint_authorized) const
 {
+	// ESAD control is targetless. It is admitted only on MAV_M_INST, using the
+	// separately configured owner identity and signing link as its authority.
+	return enabled() && _control_configuration_valid && udp_endpoint_authorized
+	       && control_source_matches(message)
+	       && signing_link_matches(message, _control_link_id);
+}
+
+bool MavlinkMHandler::handle_message(const mavlink_message_t &message,
+		bool udp_endpoint_authorized)
+{
+	if (message.msgid == MAVLINK_MSG_ID_HEARTBEAT
+	    && message.len >= MAVLINK_MSG_ID_HEARTBEAT_MIN_LEN
+	    && task_message_allowed(message, udp_endpoint_authorized)) {
+		mavlink_heartbeat_t heartbeat{};
+		mavlink_msg_heartbeat_decode(&message, &heartbeat);
+
+		// Task traffic is naturally sparse. Sustain movement authority with the
+		// standard GCS heartbeat only after all cue-route gates have passed.
+		if (heartbeat.type == MAV_TYPE_GCS) {
+			_source_last_seen[message.sysid] = hrt_absolute_time();
+		}
+
+		return false;
+	}
+
+	if (is_esad_control_message(message.msgid)) {
+		// Returning false is deliberate only for an authorized frame: it permits
+		// the normal forwarding path to carry the byte-identical signed message to
+		// the selected ESAD output. Every unauthorized form is consumed here.
+		return !esad_control_allowed(message, udp_endpoint_authorized);
+	}
+
 	if (message.msgid == MAVLINK_MSG_ID_COMMAND_LONG
-	    && (_mode == 1 || _mode == 2) && _control_configuration_valid
-	    && message.len >= OwnerDecisionRequiredWireLength
-	    && message.len <= MAVLINK_MSG_ID_COMMAND_LONG_LEN) {
+	    && message.len >= OwnerDecisionCommandWireLength) {
 		mavlink_command_long_t command{};
 		mavlink_msg_command_long_decode(&message, &command);
 
 		if (command.command == OwnerDecisionCommand) {
-			return handle_control_command(message);
+			return handle_control_command(message, udp_endpoint_authorized);
 		}
 	}
 
-	if (!enabled()) {
+	const bool task_message = message.msgid == MAVLINK_MSG_ID_TRACK_IDENTITY
+			  || message.msgid == MAVLINK_MSG_ID_TARGET_CUE
+			  || message.msgid == MAVLINK_MSG_ID_TARGET_HANDOVER;
+
+	if (!task_message) {
 		return false;
 	}
 
-	// Any frame from the configured endpoint refreshes the informational
-	// source-fresh flag. Cue acceptance itself remains governed by the cue's
-	// persisted validity window, not by a removed private capability message.
-	if (source_matches(message)) {
-		_source_last_seen[message.sysid] = hrt_absolute_time();
+	if (!task_message_allowed(message, udp_endpoint_authorized)) {
+		return true;
 	}
 
-	if (message.msgid != MAVLINK_MSG_ID_TRACK_IDENTITY
-	    && message.msgid != MAVLINK_MSG_ID_TARGET_CUE
-	    && message.msgid != MAVLINK_MSG_ID_TARGET_HANDOVER) {
-		return false;
-	}
-
-	if (!task_message_allowed(message)) {
-		return false;
-	}
+	_source_last_seen[message.sysid] = hrt_absolute_time();
 
 	if (message.msgid == MAVLINK_MSG_ID_TRACK_IDENTITY) {
 		handle_track_identity(message);
@@ -672,7 +946,8 @@ bool MavlinkMHandler::handle_message(const mavlink_message_t &message)
 	return true;
 }
 
-bool MavlinkMHandler::handle_control_command(const mavlink_message_t &message)
+bool MavlinkMHandler::handle_control_command(const mavlink_message_t &message,
+		bool udp_endpoint_authorized)
 {
 	mavlink_command_long_t command{};
 	mavlink_msg_command_long_decode(&message, &command);
@@ -683,7 +958,7 @@ bool MavlinkMHandler::handle_control_command(const mavlink_message_t &message)
 	// all-components form is ours but deliberately denied: a cue decision must
 	// name one exact owned autopilot.
 	if (command.target_system != 0 && command.target_system != vehicle_system) {
-		return false;
+		return true;
 	}
 
 	if (command.target_system != vehicle_system
@@ -695,7 +970,9 @@ bool MavlinkMHandler::handle_control_command(const mavlink_message_t &message)
 	// Every handler instance sees the same route parameters. Consuming and
 	// denying USER_1 here prevents a wrong-link request from falling through to
 	// PX4's generic vehicle_command path.
-	if (!control_enabled() || !control_source_matches(message)) {
+	if (!control_enabled() || !udp_endpoint_authorized
+	    || !control_source_matches(message)
+	    || !signing_link_matches(message, _control_link_id)) {
 		send_control_command_ack(message, MAV_RESULT_DENIED);
 		return true;
 	}
@@ -1867,6 +2144,7 @@ bool MavlinkMHandler::movement_acceptance_ready(const Assignment &assignment, co
 	_vehicle_status_sub.update(&_vehicle_status);
 	_vehicle_land_detected_sub.update(&_vehicle_land_detected);
 	_global_position_sub.update(&_global_position);
+	_local_position_sub.update(&_local_position);
 
 	if (!vehicle_ready_for_reposition() || !vehicle_airborne_for_reposition()) {
 		*reason = "movement blocked: vehicle must be armed, airborne, safe, and in Hold";
@@ -1885,6 +2163,50 @@ bool MavlinkMHandler::movement_acceptance_ready(const Assignment &assignment, co
 	if (guarded_intercept
 	    && fabsf(assignment.alt - _global_position.alt) > _intercept_delta_z_m) {
 		*reason = "movement blocked: cue altitude exceeds MAV_M_INT_DZ";
+		return false;
+	}
+
+	if (guarded_intercept && !intercept_terrain_clearance_valid(assignment.alt, reason)) {
+		return false;
+	}
+
+	return true;
+}
+
+bool MavlinkMHandler::intercept_terrain_clearance_valid(float candidate_altitude_m, const char **reason) const
+{
+	if (_intercept_clearance_m < 0.f) {
+		return true;
+	}
+
+	const hrt_abstime now = hrt_absolute_time();
+	const bool global_terrain_fresh = _global_position.timestamp != 0
+					  && now >= _global_position.timestamp
+					  && now - _global_position.timestamp < 2'000'000
+					  && _global_position.terrain_alt_valid
+					  && PX4_ISFINITE(_global_position.alt)
+					  && PX4_ISFINITE(_global_position.terrain_alt);
+	const bool hagl_fresh = _local_position.timestamp != 0
+				&& now >= _local_position.timestamp
+				&& now - _local_position.timestamp < 2'000'000
+				&& _local_position.dist_bottom_valid
+				&& PX4_ISFINITE(_local_position.dist_bottom);
+
+	if (!global_terrain_fresh || !hagl_fresh) {
+		*reason = "movement blocked: MAV_M_INT_CLR requires fresh terrain and HAGL";
+		return false;
+	}
+
+	const float actual_terrain_clearance_m = _global_position.alt - _global_position.terrain_alt;
+	const float candidate_terrain_clearance_m = candidate_altitude_m - _global_position.terrain_alt;
+
+	if (!PX4_ISFINITE(candidate_altitude_m)
+	    || !PX4_ISFINITE(actual_terrain_clearance_m)
+	    || !PX4_ISFINITE(candidate_terrain_clearance_m)
+	    || actual_terrain_clearance_m < _intercept_clearance_m
+	    || _local_position.dist_bottom < _intercept_clearance_m
+	    || candidate_terrain_clearance_m < _intercept_clearance_m) {
+		*reason = "movement blocked: MAV_M_INT_CLR terrain clearance breached";
 		return false;
 	}
 
@@ -1940,9 +2262,12 @@ bool MavlinkMHandler::publish_vehicle_command(const Assignment &assignment, uint
 	return _vehicle_command_pub.publish(vehicle_command);
 }
 
-bool MavlinkMHandler::publish_internal_fly_through(const Assignment &assignment, float altitude_m, uint32_t token)
+bool MavlinkMHandler::publish_internal_fly_through(const Assignment &assignment, float altitude_m,
+		float recovery_altitude_m, float minimum_clearance_m, uint32_t token)
 {
-	if (_mavlink == nullptr || !PX4_ISFINITE(altitude_m) || token == 0 || token > InterceptTokenMaximum) {
+	if (_mavlink == nullptr || !PX4_ISFINITE(altitude_m) || !PX4_ISFINITE(recovery_altitude_m)
+	    || !approximately_equal(sanitize_intercept_clearance(minimum_clearance_m), minimum_clearance_m)
+	    || token == 0 || token > InterceptTokenMaximum) {
 		return false;
 	}
 
@@ -1954,6 +2279,8 @@ bool MavlinkMHandler::publish_internal_fly_through(const Assignment &assignment,
 	// completion of this accepted cue.
 	vehicle_command.param1 = static_cast<float>(token & UINT16_MAX);
 	vehicle_command.param2 = static_cast<float>((token >> 16) & UINT16_MAX);
+	vehicle_command.param3 = recovery_altitude_m;
+	vehicle_command.param4 = minimum_clearance_m;
 	vehicle_command.param5 = assignment.lat * 1e-7;
 	vehicle_command.param6 = assignment.lon * 1e-7;
 	vehicle_command.param7 = altitude_m;
@@ -2044,7 +2371,8 @@ MavlinkMHandler::CommandApplicationResult MavlinkMHandler::command_active_assign
 	}
 
 	const bool command_published = guarded_intercept
-				       ? publish_internal_fly_through(_active, target_alt, intercept_token)
+				       ? publish_internal_fly_through(_active, target_alt, acceptance_alt,
+						       _intercept_clearance_m, intercept_token)
 				       : publish_vehicle_command(_active, vehicle_command_s::VEHICLE_CMD_DO_REPOSITION,
 					       NAN, RepositionChangeModeFlag, NAN, NAN,
 					       target_lat, target_lon, target_alt);
@@ -2056,6 +2384,10 @@ MavlinkMHandler::CommandApplicationResult MavlinkMHandler::command_active_assign
 		if (guarded_intercept) {
 			_active.command_flags |= CommandInterceptAltitude;
 			begin_intercept_tracking(acceptance_alt, target_alt, intercept_token);
+
+			if (_intercept_clearance_m < 0.f) {
+				PX4_WARN("MAV_M_INT_CLR=-1: externally surveyed corridor override accepted locally for this effect-2 cue");
+			}
 		}
 
 		// Publishing the replacement command releases the predecessor. Clear its
@@ -2279,6 +2611,22 @@ bool MavlinkMHandler::intercept_loiter_setpoint_matches(float expected_altitude_
 	       && fabsf(setpoint.alt - expected_altitude_m) <= SetpointAltitudeToleranceM;
 }
 
+bool MavlinkMHandler::intercept_recovery_setpoint_matches(float recovery_altitude_m) const
+{
+	const position_setpoint_s &setpoint = _position_setpoint_triplet.current;
+	const position_setpoint_s &next = _position_setpoint_triplet.next;
+
+	if (!setpoint.valid || setpoint.type != position_setpoint_s::SETPOINT_TYPE_POSITION
+	    || !PX4_ISFINITE(setpoint.lat) || !PX4_ISFINITE(setpoint.lon)
+	    || !PX4_ISFINITE(setpoint.alt) || !PX4_ISFINITE(recovery_altitude_m)
+	    || next.valid) {
+		return false;
+	}
+
+	return fabsf(setpoint.alt - recovery_altitude_m) <= SetpointAltitudeToleranceM
+	       && !setpoint.mavlink_m_exact_altitude;
+}
+
 bool MavlinkMHandler::intercept_safety_gates_valid(const char **reason) const
 {
 	if (!intercept_assignment_matches(_active)
@@ -2326,6 +2674,16 @@ bool MavlinkMHandler::intercept_safety_gates_valid(const char **reason) const
 		return false;
 	}
 
+	const bool recovery_navigation_owned =
+		intercept_recovery_setpoint_matches(_intercept_acceptance_altitude_m)
+		|| intercept_loiter_setpoint_matches(_intercept_acceptance_altitude_m);
+
+	if (!intercept_terrain_clearance_valid(_intercept_acceptance_altitude_m, reason)
+	    || (!recovery_navigation_owned
+		&& !intercept_terrain_clearance_valid(_active.alt, reason))) {
+		return false;
+	}
+
 	return true;
 }
 
@@ -2367,6 +2725,8 @@ void MavlinkMHandler::update_intercept_command_ack()
 			break;
 
 		case vehicle_command_ack_s::VEHICLE_CMD_RESULT_FAILED:
+			_intercept_completion_ack_time = hrt_absolute_time();
+
 			if (ack.result_param1 == 1) {
 				_intercept_navigator_missed = true;
 
@@ -2404,13 +2764,25 @@ void MavlinkMHandler::update_intercept()
 
 	const hrt_abstime now = hrt_absolute_time();
 	const bool transit_setpoint_owned = intercept_transit_setpoint_matches(_intercept_expected_altitude_m);
-	const bool target_loiter_owned = intercept_loiter_setpoint_matches(_intercept_expected_altitude_m);
+	const bool recovery_setpoint_owned = intercept_recovery_setpoint_matches(_intercept_acceptance_altitude_m);
+	const bool recovery_loiter_owned = intercept_loiter_setpoint_matches(_intercept_acceptance_altitude_m);
+	const bool recovery_altitude_reached = PX4_ISFINITE(_global_position.alt)
+					       && PX4_ISFINITE(_intercept_acceptance_altitude_m)
+					       && fabsf(_global_position.alt - _intercept_acceptance_altitude_m)
+					       <= RecoveryAltitudeToleranceM;
 
 	if (_intercept_navigator_missed) {
-		// Navigator evaluated the one and only target-plane crossing outside the
-		// tight hit bounds, then deliberately established target-centered loiter.
-		// Latch failure without replacing that safe loiter.
-		abort_intercept("exact target missed; target-centered loiter retained");
+		// A miss remains an aborted acceptance, but Navigator first completes the
+		// same acceptance-altitude recovery used after a hit. Never leave a missed
+		// aircraft loitering or descending at cue altitude.
+		if (recovery_loiter_owned && recovery_altitude_reached) {
+			abort_intercept("exact target missed; acceptance-altitude target loiter retained");
+
+		} else if (_intercept_completion_ack_time != 0
+			   && now - _intercept_completion_ack_time >= CompletionAckTimeout) {
+			abort_intercept("exact target missed without owned recovery loiter", true);
+		}
+
 		return;
 	}
 
@@ -2420,7 +2792,7 @@ void MavlinkMHandler::update_intercept()
 	}
 
 	if (_intercept_phase == InterceptPhase::Transit) {
-		if (transit_setpoint_owned) {
+		if (transit_setpoint_owned || recovery_setpoint_owned) {
 			// Seeing the private token-bound approach or target triplet binds this
 			// state machine to Navigator's exact fly-through path. Merely entering
 			// the future loiter radius can never satisfy this gate.
@@ -2434,7 +2806,7 @@ void MavlinkMHandler::update_intercept()
 			return;
 		}
 
-		if (target_loiter_owned && _intercept_setpoint_seen) {
+		if (recovery_loiter_owned && _intercept_setpoint_seen) {
 			if (_intercept_navigator_completed) {
 				// The target loiter transition is accepted only with Navigator's
 				// token-matched completion ACK. An ordinary reposition to the same
@@ -2468,7 +2840,7 @@ void MavlinkMHandler::update_intercept()
 	}
 
 	if (_intercept_phase == InterceptPhase::Complete) {
-		if (target_loiter_owned) {
+		if (recovery_loiter_owned && recovery_altitude_reached) {
 			_intercept_setpoint_seen = true;
 			return;
 		}
@@ -2481,7 +2853,7 @@ void MavlinkMHandler::update_intercept()
 		return;
 	}
 
-	if (_intercept_phase != InterceptPhase::Dwell || !target_loiter_owned
+	if (_intercept_phase != InterceptPhase::Dwell || !recovery_loiter_owned
 	    || !_intercept_setpoint_seen) {
 		abort_intercept("fly-through completion was not retained");
 		return;
@@ -2493,8 +2865,9 @@ void MavlinkMHandler::update_intercept()
 					 _global_position.lat, _global_position.lon, target_lat, target_lon);
 	const float arrival_radius_m = intercept_arrival_radius();
 	const bool inside_radius = PX4_ISFINITE(distance_m) && distance_m <= arrival_radius_m;
+	const bool recovery_dwell_eligible = inside_radius && recovery_altitude_reached;
 
-	if (!inside_radius) {
+	if (!recovery_dwell_eligible) {
 		if (_intercept_dwell_started != 0) {
 			_intercept_dwell_started = 0;
 			publish_status();
@@ -2521,15 +2894,17 @@ void MavlinkMHandler::update_intercept()
 	// reposition command is emitted here.
 	safety_reason = nullptr;
 	const bool task_and_vehicle_safe = intercept_safety_gates_valid(&safety_reason);
-	const bool setpoint_still_owned = intercept_loiter_setpoint_matches(_intercept_expected_altitude_m);
+	const bool setpoint_still_owned = intercept_loiter_setpoint_matches(_intercept_acceptance_altitude_m);
 	const bool fly_through_complete = _intercept_phase == InterceptPhase::Dwell
 					  && _intercept_setpoint_seen;
-	const bool altitude_within_limit = PX4_ISFINITE(_intercept_acceptance_altitude_m)
-					   && fabsf(_active.alt - _intercept_acceptance_altitude_m) <= _intercept_delta_z_m;
+	const bool recovery_altitude_within_tolerance = PX4_ISFINITE(_global_position.alt)
+			&& PX4_ISFINITE(_intercept_acceptance_altitude_m)
+			&& fabsf(_global_position.alt - _intercept_acceptance_altitude_m)
+			<= RecoveryAltitudeToleranceM;
 
 	if (!intercept_completion_allowed(task_and_vehicle_safe, true, true,
 					setpoint_still_owned, fly_through_complete && inside_radius, dwell_complete,
-					altitude_within_limit)) {
+					recovery_altitude_within_tolerance)) {
 		abort_intercept(safety_reason != nullptr ? safety_reason : "completion gate changed");
 		return;
 	}
@@ -2783,7 +3158,7 @@ void MavlinkMHandler::send_control_command_ack(const mavlink_message_t &request,
 
 void MavlinkMHandler::send_control_status()
 {
-	if (!control_enabled()) {
+	if (!control_enabled() && !enabled()) {
 		return;
 	}
 
@@ -2823,6 +3198,12 @@ void MavlinkMHandler::send_control_status()
 	};
 
 	_mavlink->set_proto_version(2);
+	// These receiver-authored fields let every fleet observer render the same
+	// cue state without mistaking visibility for decision authority. Zero means
+	// network decisions are disabled; minus one is the documented any-system
+	// selector. PX4 still enforces the selector on every command.
+	send_int("AAGS_CSYS", _control_configuration_valid ? _control_system : 0);
+	send_int("AAGS_CCMP", _control_configuration_valid ? _control_component : 0);
 
 	if (pending || active) {
 		// Send a correlated, receiver-local snapshot before the actionable
@@ -2998,7 +3379,27 @@ void MavlinkMHandler::publish_status()
 
 void MavlinkMHandler::update()
 {
+	const hrt_abstime now = hrt_absolute_time();
+	const bool route_selected = cue_route_selected() || control_route_selected();
+
+	if (route_selected) {
+		// Signed MAVLink-M traffic cannot be represented in MAVLink 1. Select
+		// MAVLink 2 even while a physical route is waiting for UTC or its key.
+		_mavlink->set_proto_version(2);
+	}
+
+	if (route_selected && signing_required() && !signing_active()
+	    && (_last_signing_retry == 0 || now - _last_signing_retry >= 1'000'000)) {
+		_last_signing_retry = now;
+		(void)configure_signing();
+	}
+
+	if (_udp_peer_configuration_dirty) {
+		apply_udp_peer_configuration();
+	}
+
 	_global_position_sub.update(&_global_position);
+	_local_position_sub.update(&_local_position);
 	_attitude_sub.update(&_attitude);
 	_vehicle_land_detected_sub.update(&_vehicle_land_detected);
 	_vehicle_status_sub.update(&_vehicle_status);
@@ -3014,11 +3415,6 @@ void MavlinkMHandler::update()
 	if (!cue_receiver_enabled && !owner_control_enabled) {
 		return;
 	}
-
-	// All MAVLink-M message IDs are above the MAVLink 1 range.
-	_mavlink->set_proto_version(2);
-
-	const hrt_abstime now = hrt_absolute_time();
 
 	if (cue_receiver_enabled) {
 		if (!_state_loaded) {
@@ -3050,7 +3446,12 @@ void MavlinkMHandler::update()
 		}
 	}
 
-	if (owner_control_enabled && now - _last_control_status_send >= 200'000) {
+	// Publish receiver-confirmed cue state on both the owner route and the cue
+	// route. Separate-endpoint observers receive state without gaining control,
+	// because command authorization remains bound to MAV_M_CTL_INST and its
+	// independent identity, endpoint, and signing-link checks.
+	if ((owner_control_enabled || cue_receiver_enabled)
+	    && now - _last_control_status_send >= 200'000) {
 		send_control_status();
 	}
 }
@@ -3062,12 +3463,8 @@ bool MavlinkMHandler::configure_signing()
 	}
 
 	mavlink_status_t *tx_status = _mavlink->get_status();
-	const bool selected_cue_link = _endpoint_configuration_valid
-				       && _mode == 2
-				       && _mavlink->get_instance_id() == _instance;
-	const bool selected_control_link = _control_configuration_valid
-					   && _mode == 2
-					   && _mavlink->get_instance_id() == _control_instance;
+	const bool selected_cue_link = _mode == 2 && cue_route_selected();
+	const bool selected_control_link = _mode == 2 && control_route_selected();
 	const bool selected_physical_link = selected_cue_link || selected_control_link;
 
 	if (!selected_physical_link) {
@@ -3082,40 +3479,46 @@ bool MavlinkMHandler::configure_signing()
 		}
 
 		_signing_ready = false;
+		_signing_failure_warned = false;
+		_last_signing_retry = 0;
 		return _mode != 2;
 	}
 
-	if (!_signing_ready) {
-		uint8_t key[32] {};
-		const uint64_t timestamp = signing_timestamp();
-
-		if (timestamp == 0 || !load_signing_key(key)) {
-			if (tx_status->signing == &_signing) {
-				tx_status->signing = nullptr;
-				tx_status->signing_streams = nullptr;
-			}
-
-			if (_receiver_status != nullptr && _receiver_status->signing == &_signing) {
-				_receiver_status->signing = nullptr;
-				_receiver_status->signing_streams = nullptr;
-			}
-
-			PX4_ERR("MAVLink-M signed mode unavailable: key/time invalid");
-			return false;
-		}
-
-		_signing = mavlink_signing_t{};
-		_signing_streams = mavlink_signing_streams_t{};
-		_signing.flags = MAVLINK_SIGNING_FLAG_SIGN_OUTGOING;
-		_signing.link_id = static_cast<uint8_t>(selected_control_link
-						       ? _control_link_id : _link_id);
-		_signing.timestamp = timestamp;
-		memcpy(_signing.secret_key, key, sizeof(_signing.secret_key));
-		_signing.accept_unsigned_callback = nullptr;
-		_signing_ready = true;
-		PX4_INFO("MAVLink-M signed physical link active");
+	if (signing_active()) {
+		return true;
 	}
 
+	_signing_ready = false;
+	uint8_t key[32] {};
+	const uint64_t timestamp = signing_timestamp();
+
+	if (timestamp == 0 || !load_signing_key(key)) {
+		if (tx_status->signing == &_signing) {
+			tx_status->signing = nullptr;
+			tx_status->signing_streams = nullptr;
+		}
+
+		if (_receiver_status != nullptr && _receiver_status->signing == &_signing) {
+			_receiver_status->signing = nullptr;
+			_receiver_status->signing_streams = nullptr;
+		}
+
+		if (!_signing_failure_warned) {
+			PX4_ERR("MAVLink-M signed mode locked: key/time invalid");
+			_signing_failure_warned = true;
+		}
+
+		return false;
+	}
+
+	_signing = mavlink_signing_t{};
+	_signing_streams = mavlink_signing_streams_t{};
+	_signing.flags = MAVLINK_SIGNING_FLAG_SIGN_OUTGOING;
+	_signing.link_id = static_cast<uint8_t>(selected_control_link
+						? _control_link_id : _link_id);
+	_signing.timestamp = timestamp;
+	memcpy(_signing.secret_key, key, sizeof(_signing.secret_key));
+	_signing.accept_unsigned_callback = nullptr;
 	tx_status->signing = &_signing;
 	tx_status->signing_streams = &_signing_streams;
 
@@ -3124,7 +3527,16 @@ bool MavlinkMHandler::configure_signing()
 		_receiver_status->signing_streams = &_signing_streams;
 	}
 
-	return true;
+	_signing_ready = _receiver_status != nullptr
+			 && _receiver_status->signing == &_signing
+			 && _receiver_status->signing_streams == &_signing_streams;
+
+	if (_signing_ready) {
+		_signing_failure_warned = false;
+		PX4_INFO("MAVLink-M signed physical link active");
+	}
+
+	return _signing_ready;
 }
 
 bool MavlinkMHandler::load_signing_key(uint8_t key[32]) const
@@ -3221,9 +3633,13 @@ uint64_t MavlinkMHandler::utc_now_usec()
 
 uint32_t MavlinkMHandler::state_crc(const PersistedState &state) const
 {
-	PersistedState copy = state;
-	copy.crc = 0;
-	return crc32_signature(0, sizeof(copy), reinterpret_cast<const uint8_t *>(&copy));
+	const auto *bytes = reinterpret_cast<const uint8_t *>(&state);
+	constexpr size_t crc_offset = offsetof(PersistedState, crc);
+	const uint32_t zero_crc = 0;
+	uint32_t crc = crc32_signature(0, crc_offset, bytes);
+	crc = crc32_signature(crc, sizeof(zero_crc), reinterpret_cast<const uint8_t *>(&zero_crc));
+	const size_t suffix_offset = crc_offset + sizeof(state.crc);
+	return crc32_signature(crc, sizeof(state) - suffix_offset, bytes + suffix_offset);
 }
 
 bool MavlinkMHandler::load_state()
@@ -3252,32 +3668,32 @@ bool MavlinkMHandler::load_state()
 	    || state.source_component != static_cast<uint8_t>(_source_component)
 	    || strncmp(state.profile_hash, AAGS_MAVLINK_M_CORE_XML_SHA256, sizeof(state.profile_hash)) != 0) {
 		PX4_WARN("ignoring MAVLink-M state for different endpoint/profile");
-		Assignment stale_navigation{};
+		Assignment *stale_navigation = nullptr;
 
-		for (const Assignment &assignment : state.terminal) {
+		for (Assignment &assignment : state.terminal) {
 			if ((assignment.command_flags & CommandNav) != 0
 			    && (assignment.command_flags & CommandStopPending) != 0) {
-				stale_navigation = assignment;
+				stale_navigation = &assignment;
 				break;
 			}
 		}
 
-		if (stale_navigation.state == AssignmentState::Empty
+		if (stale_navigation == nullptr
 		    && state.active.state == AssignmentState::Active
 		    && (state.active.command_flags & CommandNav) != 0) {
-			stale_navigation = state.active;
-			stale_navigation.state = AssignmentState::Aborted;
-			stale_navigation.last_ack_result = MAVLINK_M_ACK_REJECTED;
-			stale_navigation.command_flags |= CommandStopPending;
-			++stale_navigation.status_sequence;
+			state.active.state = AssignmentState::Aborted;
+			state.active.last_ack_result = MAVLINK_M_ACK_REJECTED;
+			state.active.command_flags |= CommandStopPending;
+			++state.active.status_sequence;
+			stale_navigation = &state.active;
 		}
 
-		if (stale_navigation.state != AssignmentState::Empty) {
+		if (stale_navigation != nullptr) {
 			// Quarantine only the cancellation authority under the new endpoint
 			// header. The old task is never restored as Active, but its stop survives
 			// repeated MAVLink module restarts until a hold is confirmed and saved.
 			_active = Assignment{};
-			_deferred_navigation_stop = stale_navigation;
+			_deferred_navigation_stop = *stale_navigation;
 
 			for (Assignment &assignment : _inbox) {
 				assignment = Assignment{};
@@ -3295,8 +3711,8 @@ bool MavlinkMHandler::load_state()
 				identity = TrackIdentity{};
 			}
 
-			remember_terminal(stale_navigation, stale_navigation.state,
-					 stale_navigation.last_ack_result);
+			remember_terminal(*stale_navigation, stale_navigation->state,
+					 stale_navigation->last_ack_result);
 
 			if (!save_state()) {
 				PX4_WARN("stale MAVLink-M navigation quarantine was not persisted");
@@ -3353,15 +3769,14 @@ bool MavlinkMHandler::load_state()
 		// its navigation command. A restart in that narrow window proves that no
 		// committed command exists. Return the cue to Pending so it requires a new
 		// explicit decision instead of restoring a commandless Active task.
-		Assignment retry = _active;
-		retry.state = AssignmentState::Pending;
-		retry.last_ack_result = MAVLINK_M_ACK_RECEIVED;
-		retry.restored = 1;
-		++retry.status_sequence;
+		_active.state = AssignmentState::Pending;
+		_active.last_ack_result = MAVLINK_M_ACK_RECEIVED;
+		_active.restored = 1;
+		++_active.status_sequence;
 		Assignment *slot = find_free_inbox();
 
 		if (slot != nullptr) {
-			*slot = retry;
+			*slot = _active;
 			_active = Assignment{};
 			PX4_WARN("restored uncommitted MAVLink-M movement as pending");
 
@@ -3369,7 +3784,7 @@ bool MavlinkMHandler::load_state()
 			// The normal staging transition always frees the candidate's inbox slot.
 			// If a CRC-valid but inconsistent state has no slot, fail the commandless
 			// task closed rather than making it impossible to decide or abort.
-			remember_terminal(retry, AssignmentState::Aborted, MAVLINK_M_ACK_FAILED);
+			remember_terminal(_active, AssignmentState::Aborted, MAVLINK_M_ACK_FAILED);
 			_active = Assignment{};
 			PX4_WARN("aborted inconsistent uncommitted MAVLink-M movement");
 		}
@@ -3479,6 +3894,10 @@ bool MavlinkMHandler::save_state()
 	if (!success || rename(StateTempPath, StatePath) != 0) {
 		(void)unlink(StateTempPath);
 		PX4_ERR("MAVLink-M state commit failed (%d)", errno);
+		return false;
+	}
+
+	if (!sync_persistence_directory("state commit")) {
 		return false;
 	}
 

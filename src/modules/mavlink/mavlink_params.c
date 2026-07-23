@@ -201,18 +201,68 @@ PARAM_DEFINE_INT32(MAV_M_LNK_ID, 0);
 PARAM_DEFINE_INT32(MAV_M_INST, 0);
 
 /**
- * MAVLink output instance for ESAD arming
+ * Maximum learned AAGS UDP peers
  *
- * Selects the one MAVLink output instance used when forwarding an incoming
- * ESAD_ARMING command. Minus one preserves standard MAVLink forwarding. Values
- * zero through five restrict ESAD_ARMING forwarding to that instance. Standard
- * forwarding may copy the broadcast to every other eligible forwarding-enabled
- * instance; it is not a synonym for one physical telemetry port.
+ * On the selected MAV_M_INST UDP link, PX4 can learn this many AAGS stations
+ * from valid MAV_TYPE_GCS heartbeats sent by component 190. Outgoing telemetry
+ * and receiver-confirmed cue state are copied to every live learned endpoint.
+ * This does not grant cue-source or owner-control authority; MAV_M_SRC_SYS/CMP
+ * and MAV_M_CTL_SYS/CMP remain independently enforced.
  *
- * The instance receiving ESAD_ARMING from AAGS and the selected output instance
- * must both be running with their MAV_X_FORWARD parameters enabled. This
- * parameter does not start a MAVLink instance or enable forwarding. ESAD_STATE
- * return traffic and all other messages retain standard forwarding.
+ * The table is fixed at eight entries and uses no dynamic allocation. A
+ * separately configured MAVLink partner address remains available in addition
+ * to the learned table and is never replaced by peer discovery.
+ *
+ * Set zero when a vehicle-side router or mesh gateway is the one pinned
+ * partner. This disables learned-peer admission and fanout while preserving
+ * that configured partner, so multiple downstream GCS identities may traverse
+ * the gateway without being mistaken for one conflicting direct endpoint. A
+ * gateway route must be started with an explicit -t partner address. Without
+ * that explicit partner, protected UDP ingress is denied.
+ *
+ * Values outside zero through eight fail closed to gateway mode rather than
+ * enabling direct peer learning.
+ *
+ * @group MAVLink-M
+ * @min 0
+ * @max 8
+ * @value 0 Pinned gateway only; learned peers disabled
+ */
+PARAM_DEFINE_INT32(MAV_M_PEERS, 4);
+
+/**
+ * Learned AAGS peer timeout
+ *
+ * A learned UDP endpoint is removed when PX4 has not received a valid GCS
+ * heartbeat from its system/component identity for this many seconds. A live
+ * identity cannot move to another IP address or UDP port; the old endpoint
+ * must expire first. Signed physical mode requires every registration and
+ * refresh heartbeat to have a valid MAVLink 2 signature.
+ *
+ * @group MAVLink-M
+ * @unit s
+ * @min 5
+ * @max 300
+ */
+PARAM_DEFINE_INT32(MAV_M_P_TMO, 30);
+
+/**
+ * MAVLink output instance for ESAD control
+ *
+ * Selects the one MAVLink output instance used when forwarding an authorized
+ * incoming ESAD_ARMING or ESAD_CONFIG command. Minus one preserves standard
+ * MAVLink forwarding. Values zero through five restrict both messages to that
+ * instance. Standard forwarding may copy the broadcast to every other eligible
+ * forwarding-enabled instance; it is not a synonym for one physical telemetry
+ * port.
+ *
+ * The MAV_M_INST instance receiving ESAD control from AAGS and the selected
+ * output instance must both be running with their MAV_X_FORWARD parameters
+ * enabled. Ingress additionally requires the MAV_M_CTL_SYS/CMP identity,
+ * MAV_M_CTL_LNK in signed mode, and authorized direct-peer or pinned-gateway
+ * endpoint. This parameter does not start a MAVLink instance or enable
+ * forwarding. ESAD_STATE return traffic and all other messages retain standard
+ * forwarding.
  *
  * @value -1 Standard forwarding
  * @value 0 MAVLink instance 0
@@ -286,8 +336,9 @@ PARAM_DEFINE_INT32(MAV_M_CTL_INST, -1);
  * With MAV_M_SAME_EP=0, MAV_M_CTL_INST must remain distinct from MAV_M_INST;
  * wildcard identities may overlap because the configured routes preserve the
  * cue-source and owner-control roles. With MAV_M_SAME_EP=1, source and control
- * instances, system selectors, and component IDs must match, so use minus one
- * for both system selectors or an identical exact value.
+ * share one physical instance but their system/component selectors remain
+ * independent. For example, MAV_M_SRC_SYS=-1 can accept cues from any signed
+ * AAGS while MAV_M_CTL_SYS=254 reserves Accept/Reject for GCS 254.
  *
  * @value -1 Any nonzero system on MAV_M_CTL_INST
  * @value 0 Network decisions disabled
@@ -327,15 +378,16 @@ PARAM_DEFINE_INT32(MAV_M_CTL_CMP, 190);
 PARAM_DEFINE_INT32(MAV_M_CTL_LNK, 1);
 
 /**
- * Allow one AAGS route to offer and decide cues
+ * Allow one MAVLink instance to carry cue and control roles
  *
  * Zero requires the cue source and owner-control authority to use distinct
  * MAVLink instances. Identical exact system/component identities are rejected;
  * wildcard identities may overlap because the configured routes preserve each
- * role. Value one selects the local-owner workflow: MAV_M_INST must equal
- * MAV_M_CTL_INST, MAV_M_SRC_SYS/CMP must equal MAV_M_CTL_SYS/CMP, and signed
- * mode also requires MAV_M_LNK_ID to equal MAV_M_CTL_LNK. Matching system
- * selectors means the same exact value or minus one on both sides.
+ * role. Value one selects a shared physical route: MAV_M_INST must equal
+ * MAV_M_CTL_INST and signed mode requires MAV_M_LNK_ID to equal
+ * MAV_M_CTL_LNK. Source and owner-control system/component selectors remain
+ * independent and are enforced against each received message, allowing one
+ * exact owner to control cues submitted by multiple authorized stations.
  *
  * This setting does not auto-accept a cue. An authorized owner must still make
  * an explicit Accept/Reject decision through AAGS, RC, or the local console
@@ -345,7 +397,7 @@ PARAM_DEFINE_INT32(MAV_M_CTL_LNK, 1);
  * @min 0
  * @max 1
  * @value 0 Separate cue source and owner-control endpoints
- * @value 1 Same local-owner route and source selector
+ * @value 1 Same physical route with independent source/control selectors
  * @reboot_required true
  */
 PARAM_DEFINE_INT32(MAV_M_SAME_EP, 0);
@@ -506,3 +558,33 @@ PARAM_DEFINE_FLOAT(MAV_M_INT_DWL, 3.0f);
  * @decimal 1
  */
 PARAM_DEFINE_FLOAT(MAV_M_INT_DZ, 100.0f);
+
+/**
+ * Minimum Intercept terrain clearance
+ *
+ * Minimum required height above terrain during an exact effect-2 Intercept. A
+ * nonnegative value requires fresh, valid terrain altitude and HAGL estimates
+ * before acceptance and throughout the approach, target crossing, straight
+ * recovery, and recovery loiter. PX4 reactively checks actual aircraft
+ * clearance and each active candidate setpoint against terrain under the
+ * current aircraft. It does not look ahead or prove clearance across the
+ * future corridor. Missing, stale, or invalid terrain data, or any clearance
+ * breach, fails closed and aborts the Intercept. A ground-level cue altitude
+ * normally needs zero clearance, or an externally surveyed override.
+ *
+ * Set exactly -1 only when the operator has externally surveyed the complete
+ * corridor and deliberately accepts responsibility for terrain clearance, or
+ * for controlled bench and simulation validation on a vehicle configuration
+ * that cannot provide terrain/HAGL data. It disables only the terrain-data and
+ * clearance gate. It does not auto-accept a cue or weaken source, owner,
+ * flight-state, geofence, altitude-change, exact-hit, or recovery gates. Every
+ * cue still requires a local effect-2 acceptance.
+ *
+ * @group MAVLink-M
+ * @unit m
+ * @min -1
+ * @max 1000
+ * @decimal 1
+ * @value -1 Externally surveyed corridor override
+ */
+PARAM_DEFINE_FLOAT(MAV_M_INT_CLR, 30.0f);
