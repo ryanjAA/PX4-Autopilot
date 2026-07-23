@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import tempfile
 import threading
@@ -21,7 +22,14 @@ import time
 from collections.abc import Callable
 import uuid
 
-from endpoint_tool import Endpoint, UdpTransport, fixed_text, load_dialect, text_field
+from endpoint_tool import (
+    Endpoint,
+    UdpTransport,
+    advertise_gcs,
+    fixed_text,
+    load_dialect,
+    text_field,
+)
 
 
 SOURCE_SYSTEM = 255
@@ -39,8 +47,14 @@ CONTROL_MAVLINK_INSTANCE = 2
 CONTROL_SIGNING_LINK_ID = 8
 TEST_PX4_UDP_PORT = 18671
 TEST_AAGS_UDP_PORT = 14551
+OBSERVER_AAGS_UDP_PORT = 14701
+SHARED_OWNER_AAGS_UDP_PORT = 14702
+UNRELATED_AAGS_UDP_PORT = 14703
+ESAD_OWNER_AAGS_UDP_PORT = 14704
+WILDCARD_AAGS_UDP_PORT = 14705
 CONTROL_PX4_UDP_PORT = 14281
 CONTROL_AAGS_UDP_PORT = 14031
+WILDCARD_REJECT_AAGS_UDP_PORT = 14032
 FORWARD_INGRESS_PX4_UDP_PORT = 18571
 FORWARD_INGRESS_TEST_UDP_PORT = 14651
 FORWARD_OBSERVER_PX4_UDP_PORT = 14581
@@ -92,7 +106,7 @@ class Px4Sitl:
         )
         self.reader = threading.Thread(target=self._read_output, daemon=True)
         self.reader.start()
-        self.wait_for("Startup script returned successfully", start_line, 20.0)
+        self.wait_for("Startup script returned successfully", start_line, 45.0)
         return start_line
 
     def _read_output(self) -> None:
@@ -147,6 +161,8 @@ class Px4Sitl:
             f"param set MAV_M_CTL_CMP {OWNER_COMPONENT}",
             f"param set MAV_M_CTL_LNK {CONTROL_SIGNING_LINK_ID}",
             "param set MAV_M_SAME_EP 0",
+            "param set MAV_M_PEERS 4",
+            "param set MAV_M_P_TMO 30",
             "param set MAV_M_RC_CH 5",
             "param set MAV_M_RC_REJ 1300",
             "param set MAV_M_RC_ACC 1700",
@@ -155,6 +171,7 @@ class Px4Sitl:
             "param set MAV_M_INT_RAD 25",
             "param set MAV_M_INT_DWL 3",
             "param set MAV_M_INT_DZ 100",
+            "param set MAV_M_INT_CLR -1",
             "param save",
         ]
         for command in commands:
@@ -173,11 +190,14 @@ class Px4Sitl:
             "MAV_M_CTL_SYS": OWNER_SYSTEM,
             "MAV_M_CTL_CMP": OWNER_COMPONENT,
             "MAV_M_SAME_EP": 0,
+            "MAV_M_PEERS": 4,
+            "MAV_M_P_TMO": 30,
             "MAV_M_MAX_AGE": max_age,
             "MAV_M_ACTION": 0,
             "MAV_M_INT_RAD": 25,
             "MAV_M_INT_DWL": 3,
             "MAV_M_INT_DZ": 100,
+            "MAV_M_INT_CLR": -1,
         }
         missing = [
             f"{name}={value}"
@@ -196,7 +216,7 @@ class Px4Sitl:
         """Add a non-forwarding, test-owned link after the five standard links."""
         self.command(
             f"mavlink start -x -u {TEST_PX4_UDP_PORT} "
-            f"-o {TEST_AAGS_UDP_PORT} -r 4000000"
+            f"-o {TEST_AAGS_UDP_PORT} -r 4000000 -f"
         )
         time.sleep(0.75)
         self.command(f"mavlink stream -u {TEST_PX4_UDP_PORT} -s HEARTBEAT -r 2")
@@ -361,11 +381,26 @@ def wait_for_heartbeat(endpoint: Endpoint, timeout: float = 12.0) -> None:
 
 
 def establish_udp_peer(endpoint: Endpoint) -> None:
-    endpoint.mav.heartbeat_send(
-        endpoint.dialect.MAV_TYPE_GCS,
-        endpoint.dialect.MAV_AUTOPILOT_INVALID,
-        0, 0, 0,
-    )
+    advertise_gcs(endpoint, 0.0)
+
+
+def sustain_source_with_heartbeats(
+    endpoint: Endpoint,
+    duration: float,
+    interval: float = 3.0,
+) -> int:
+    """Keep one authorized source live without retransmitting task traffic."""
+    deadline = time.monotonic() + duration
+    heartbeat_count = 0
+    while True:
+        establish_udp_peer(endpoint)
+        heartbeat_count += 1
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return heartbeat_count
+        time.sleep(min(interval, remaining))
+
+
 def drain(endpoint: Endpoint, duration: float = 0.25) -> None:
     deadline = time.monotonic() + duration
     while time.monotonic() < deadline:
@@ -383,7 +418,13 @@ def require_trimmed_payload(frame: bytes, required: int, full: int, label: str) 
         )
 
 
-def wait_for_ack(endpoint: Endpoint, message_id: int, instance: int, timeout: float = 4.0):
+def wait_for_ack(
+    endpoint: Endpoint,
+    message_id: int,
+    instance: int,
+    timeout: float = 4.0,
+    origin_system: int | None = None,
+):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for message in endpoint.receive(min(0.25, deadline - time.monotonic())):
@@ -391,6 +432,10 @@ def wait_for_ack(endpoint: Endpoint, message_id: int, instance: int, timeout: fl
                 message.get_type() == "MAVLINK_M_ACK"
                 and message.ack_msgid == message_id
                 and message.ack_instance == instance
+                and (
+                    origin_system is None
+                    or message.origin_sysid == origin_system
+                )
             ):
                 return message
     raise AcceptanceFailure(f"no ACK for msgid={message_id} instance={instance}")
@@ -482,6 +527,62 @@ def wait_for_command_ack(
     raise AcceptanceFailure(
         f"no owner decision COMMAND_ACK result={expected_result}"
     )
+
+
+def expect_no_command_ack(endpoint: Endpoint, timeout: float = 1.0) -> None:
+    """Require the UDP provenance gate to drop an identity conflict silently."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for message in endpoint.receive(min(0.2, deadline - time.monotonic())):
+            if (
+                message.get_type() == "COMMAND_ACK"
+                and message.command == endpoint.dialect.MAV_CMD_USER_1
+                and message.get_srcSystem() == VEHICLE_SYSTEM
+                and message.get_srcComponent() == VEHICLE_COMPONENT
+            ):
+                raise AcceptanceFailure(
+                    "identity-conflicting owner command unexpectedly reached "
+                    f"the command path with result={message.result}"
+                )
+
+
+def wait_for_matching_message(
+    endpoint: Endpoint,
+    description: str,
+    predicate: Callable,
+    timeout: float = 3.0,
+):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for message in endpoint.receive(min(0.2, deadline - time.monotonic())):
+            if predicate(message):
+                return message
+    raise AcceptanceFailure(f"no {description}")
+
+
+def expect_no_matching_message(
+    endpoint: Endpoint,
+    description: str,
+    predicate: Callable,
+    timeout: float = 1.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for message in endpoint.receive(min(0.2, deadline - time.monotonic())):
+            if predicate(message):
+                raise AcceptanceFailure(f"unexpected {description}")
+
+
+def mavftp_create_payload(sequence: int, path: str) -> bytes:
+    encoded_path = path.encode("utf-8") + b"\0"
+    if len(encoded_path) > 239:
+        raise AcceptanceFailure("MAVFTP test path is too long")
+    payload = bytearray(251)
+    struct.pack_into("<H", payload, 0, sequence)
+    payload[3] = 6
+    payload[4] = len(encoded_path)
+    payload[12 : 12 + len(encoded_path)] = encoded_path
+    return bytes(payload)
 
 
 def wait_for_colocated_accept_acks(
@@ -780,6 +881,223 @@ def output_float(output: str, field: str) -> float:
     return float(match.group(1))
 
 
+def exercise_signed_cold_start_lock(
+    binary: Path,
+    etc: Path,
+    rootfs: Path,
+    dialect,
+    transport: UdpTransport,
+    signed_endpoint: Endpoint,
+    max_age: int,
+    results: list[dict],
+) -> None:
+    started = time.monotonic()
+    lock_rootfs = rootfs / "signed-lock"
+    lock_rootfs.mkdir(parents=True, exist_ok=True)
+    key_path = lock_rootfs / "mavlink_m_signing.key"
+    if key_path.exists():
+        key_path.unlink()
+    locked_ftp_path = lock_rootfs / "aags-locked-denied.txt"
+    if locked_ftp_path.exists():
+        locked_ftp_path.unlink()
+
+    unsigned_probe = Endpoint(
+        dialect,
+        transport,
+        SOURCE_SYSTEM,
+        SOURCE_COMPONENT,
+    )
+    locked_px4 = Px4Sitl(binary, etc, lock_rootfs, SITL_INSTANCE)
+    try:
+        start_mark = locked_px4.start()
+        locked_px4.add_test_link()
+        locked_px4.configure(max_age, True)
+        locked_px4.wait_for(
+            "MAVLink-M signed mode locked: key/time invalid",
+            start_mark,
+            5.0,
+        )
+        drain(unsigned_probe)
+
+        establish_udp_peer(unsigned_probe)
+        unsigned_probe.mav.command_long_send(
+            VEHICLE_SYSTEM,
+            VEHICLE_COMPONENT,
+            dialect.MAV_CMD_REQUEST_MESSAGE,
+            0,
+            dialect.MAVLINK_MSG_ID_AUTOPILOT_VERSION,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        expect_no_matching_message(
+            unsigned_probe,
+            "locked COMMAND_ACK",
+            lambda message: (
+                message.get_type() == "COMMAND_ACK"
+                and message.command == dialect.MAV_CMD_REQUEST_MESSAGE
+            ),
+        )
+        unsigned_probe.mav.mission_count_send(
+            VEHICLE_SYSTEM,
+            VEHICLE_COMPONENT,
+            0,
+            dialect.MAV_MISSION_TYPE_MISSION,
+        )
+        expect_no_matching_message(
+            unsigned_probe,
+            "locked MISSION_ACK",
+            lambda message: message.get_type() == "MISSION_ACK",
+        )
+        unsigned_probe.mav.param_set_send(
+            VEHICLE_SYSTEM,
+            VEHICLE_COMPONENT,
+            fixed_text("MAV_M_INT_RAD", 16),
+            99.0,
+            dialect.MAV_PARAM_TYPE_REAL32,
+        )
+        expect_no_matching_message(
+            unsigned_probe,
+            "locked PARAM_VALUE",
+            lambda message: (
+                message.get_type() == "PARAM_VALUE"
+                and text_field(message.param_id) == "MAV_M_INT_RAD"
+            ),
+        )
+        unsigned_probe.mav.file_transfer_protocol_send(
+            0,
+            VEHICLE_SYSTEM,
+            VEHICLE_COMPONENT,
+            mavftp_create_payload(91, locked_ftp_path.name),
+        )
+        expect_no_matching_message(
+            unsigned_probe,
+            "locked MAVFTP response",
+            lambda message: (
+                message.get_type() == "FILE_TRANSFER_PROTOCOL"
+                and message.get_srcSystem() == VEHICLE_SYSTEM
+            ),
+        )
+        unsigned_probe.mav.send(
+            make_cue(
+                unsigned_probe,
+                797,
+                int(time.time() * 1_000_000),
+                "locked task",
+                cue_type=2,
+            )
+        )
+        expect_no_ack(
+            unsigned_probe,
+            dialect.MAVLINK_MSG_ID_TARGET_CUE,
+            797,
+        )
+        unsigned_probe.mav.esad_arming_send(
+            int(time.time() * 1_000_000),
+            1,
+            0xDEADBEEF,
+            1,
+            0,
+        )
+        expect_no_matching_message(
+            unsigned_probe,
+            "locked ESAD_STATE",
+            lambda message: message.get_type() == "ESAD_STATE",
+        )
+
+        locked_route_status = locked_px4.mavlink_status()
+        locked_route_pattern = re.compile(
+            rf"instance #{TEST_MAVLINK_INSTANCE}:"
+            rf"(?:(?!\ninstance #).)*?"
+            rf"transport protocol:\s*UDP \({TEST_PX4_UDP_PORT},",
+            re.DOTALL,
+        )
+        locked_route_match = locked_route_pattern.search(locked_route_status)
+        if locked_route_match is None:
+            raise AcceptanceFailure(
+                "signed locked test route missing\n" + locked_route_status
+            )
+        locked_route_section = locked_route_status[locked_route_match.start():]
+        if "MAVLink-M fleet peers: 0/4, mode direct" not in locked_route_section:
+            raise AcceptanceFailure(
+                "unsigned heartbeat registered while signed route was locked\n"
+                + locked_route_section
+            )
+        locked_vehicle = locked_px4.vehicle_status()
+        if "arming_state: 1" not in locked_vehicle:
+            raise AcceptanceFailure(
+                "generic command changed vehicle state while signed route was locked\n"
+                + locked_vehicle
+            )
+        locked_radius = locked_px4.parameter_status("MAV_M_INT_RAD")
+        if re.search(
+            r"\bMAV_M_INT_RAD\b[^\n]*:\s*25(?:\.0+)?\s*$",
+            locked_radius,
+            re.MULTILINE,
+        ) is None:
+            raise AcceptanceFailure(
+                "PARAM_SET changed state while signed route was locked\n"
+                + locked_radius
+            )
+        if locked_ftp_path.exists():
+            raise AcceptanceFailure(
+                "MAVFTP wrote a file while signed route was locked"
+            )
+
+        recovery_mark = locked_px4.mark()
+        key_path.write_bytes(SIGNING_KEY)
+        key_path.chmod(0o600)
+        locked_px4.wait_for(
+            "MAVLink-M signed physical link active",
+            recovery_mark,
+            5.0,
+        )
+        drain(signed_endpoint)
+        establish_udp_peer(signed_endpoint)
+        time.sleep(0.25)
+        recovery_cue = make_cue(
+            signed_endpoint,
+            797,
+            int(time.time() * 1_000_000),
+            "signed recovery",
+            cue_type=2,
+        )
+        signed_endpoint.mav.send(recovery_cue)
+        assert_ack(
+            wait_for_ack(
+                signed_endpoint,
+                dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                797,
+            ),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending",
+        )
+        locked_px4.command("mavlink task reject 797 53001")
+        assert_ack(
+            wait_for_ack(
+                signed_endpoint,
+                dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                797,
+            ),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator rejected",
+        )
+    finally:
+        locked_px4.stop()
+        drain(signed_endpoint)
+        if locked_ftp_path.exists():
+            locked_ftp_path.unlink()
+    record(
+        results,
+        "signed_route_cold_start_lock_and_recovery",
+        started,
+        "missing-key mode 2 dropped unsigned heartbeat, command, mission, parameter, MAVFTP, task, and ESAD traffic; installing the owner-only key unlocked signed cue receipt without reboot",
+    )
+
+
 def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> dict:
     dialect = load_dialect()
     transport = UdpTransport(
@@ -806,9 +1124,20 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         wrong_sender.signing.sign_outgoing = True
     px4 = Px4Sitl(binary, etc, rootfs, SITL_INSTANCE)
     results: list[dict] = []
+    wildcard_transport: UdpTransport | None = None
 
     try:
         if signed:
+            exercise_signed_cold_start_lock(
+                binary,
+                etc,
+                rootfs,
+                dialect,
+                transport,
+                endpoint,
+                max_age,
+                results,
+            )
             key_path = rootfs / "mavlink_m_signing.key"
             key_path.write_bytes(SIGNING_KEY)
             key_path.chmod(0o600)
@@ -835,7 +1164,9 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
                 f"test route is MAVLink instance {actual_instance}, "
                 f"but MAV_M_INST={TEST_MAVLINK_INSTANCE}\n{route_status}"
             )
-        establish_udp_peer(endpoint)
+        for _ in range(4):
+            establish_udp_peer(endpoint)
+            time.sleep(0.25)
         wait_for_heartbeat(endpoint)
         record(
             results,
@@ -843,6 +1174,625 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             started,
             f"route instance {TEST_MAVLINK_INSTANCE}; "
             f"signing={'required' if signed else 'lab-unsigned'}",
+        )
+
+        started = time.monotonic()
+        time.sleep(2.5)
+        loopback_route_status = px4.mavlink_status()
+        loopback_route_match = route_pattern.search(loopback_route_status)
+        if loopback_route_match is None:
+            raise AcceptanceFailure(
+                "no-target Direct route disappeared after loopback peer learning\n"
+                + loopback_route_status
+            )
+        loopback_route_section = loopback_route_status[
+            loopback_route_match.start():
+        ]
+        if (
+            "MAVLink-M fleet peers: 1/4, mode direct"
+            not in loopback_route_section
+            or (
+                f"GCS {SOURCE_SYSTEM}/{SOURCE_COMPONENT} "
+                f"127.0.0.1:{TEST_AAGS_UDP_PORT}"
+            )
+            not in loopback_route_section
+            or "conflicts: 0" not in loopback_route_section
+        ):
+            raise AcceptanceFailure(
+                "loopback Direct peer created a discovery alias or conflict\n"
+                + loopback_route_section
+            )
+        record(
+            results,
+            "loopback_direct_peer_suppresses_lan_discovery_alias",
+            started,
+            "no-target Direct route retained one exact 127/8 GCS peer and zero endpoint conflicts after subsequent discovery intervals",
+        )
+
+        started = time.monotonic()
+        esad_owner_transport = UdpTransport(
+            ("127.0.0.1", ESAD_OWNER_AAGS_UDP_PORT),
+            ("127.0.0.1", TEST_PX4_UDP_PORT),
+        )
+        esad_owner = Endpoint(
+            dialect,
+            esad_owner_transport,
+            OWNER_SYSTEM,
+            OWNER_COMPONENT,
+            SIGNING_KEY if signed else None,
+            CONTROL_SIGNING_LINK_ID,
+        )
+        esad_output_transport = UdpTransport(
+            ("127.0.0.1", FORWARD_OBSERVER_TEST_UDP_PORT),
+            ("127.0.0.1", FORWARD_OBSERVER_PX4_UDP_PORT),
+        )
+        esad_output = Endpoint(
+            dialect,
+            esad_output_transport,
+            1,
+            1,
+            SIGNING_KEY if signed else None,
+            CONTROL_SIGNING_LINK_ID,
+        )
+        try:
+            esad_param_mark = px4.mark()
+            px4.command("param set MAV_M_ESAD_I 1")
+            px4.wait_for("MAV_M_ESAD_I:", esad_param_mark, 5.0)
+            drain(esad_output)
+            establish_udp_peer(esad_owner)
+            time.sleep(0.3)
+            esad_time_usec = int(time.time() * 1_000_000)
+            esad_owner.mav.esad_arming_send(
+                esad_time_usec,
+                1,
+                0xDEADBEEF,
+                1,
+                0,
+            )
+            forwarded_esad = wait_for_matching_message(
+                esad_output,
+                "first-message ESAD_ARMING on explicit output",
+                lambda message: (
+                    message.get_type() == "ESAD_ARMING"
+                    and message.get_srcSystem() == OWNER_SYSTEM
+                    and message.get_srcComponent() == OWNER_COMPONENT
+                ),
+            )
+            if (
+                forwarded_esad.time_usec != esad_time_usec
+                or forwarded_esad.esad_id != 1
+                or forwarded_esad.arming_challenge_hash != 0xDEADBEEF
+                or forwarded_esad.arming_request != 1
+                or forwarded_esad.store_id != 0
+                or (
+                    signed
+                    and (
+                        not forwarded_esad.get_signed()
+                        or forwarded_esad.get_link_id()
+                        != CONTROL_SIGNING_LINK_ID
+                    )
+                )
+            ):
+                raise AcceptanceFailure(
+                    "explicit ESAD output changed the first authorized frame"
+                )
+
+            wrong_identity_sender = dialect.MAVLink(
+                esad_owner_transport,
+                srcSystem=OWNER_SYSTEM - 1,
+                srcComponent=OWNER_COMPONENT,
+            )
+            if signed:
+                wrong_identity_sender.signing.secret_key = SIGNING_KEY
+                wrong_identity_sender.signing.link_id = CONTROL_SIGNING_LINK_ID
+                wrong_identity_sender.signing.timestamp = max(
+                    1, int((time.time() - 1_420_070_400) * 100_000)
+                )
+                wrong_identity_sender.signing.sign_outgoing = True
+            drain(esad_output)
+            wrong_identity_sender.esad_arming_send(
+                int(time.time() * 1_000_000),
+                1,
+                0xDEADBEEF,
+                1,
+                0,
+            )
+            expect_no_matching_message(
+                esad_output,
+                "wrong-identity ESAD forwarding",
+                lambda message: message.get_type() == "ESAD_ARMING",
+            )
+
+            if signed:
+                wrong_link_sender = dialect.MAVLink(
+                    esad_owner_transport,
+                    srcSystem=OWNER_SYSTEM,
+                    srcComponent=OWNER_COMPONENT,
+                )
+                wrong_link_sender.signing.secret_key = SIGNING_KEY
+                wrong_link_sender.signing.link_id = 7
+                wrong_link_sender.signing.timestamp = max(
+                    1, int((time.time() - 1_420_070_400) * 100_000)
+                )
+                wrong_link_sender.signing.sign_outgoing = True
+                wrong_link_sender.esad_arming_send(
+                    int(time.time() * 1_000_000),
+                    1,
+                    0xDEADBEEF,
+                    1,
+                    0,
+                )
+                expect_no_matching_message(
+                    esad_output,
+                    "wrong-link ESAD forwarding",
+                    lambda message: message.get_type() == "ESAD_ARMING",
+                )
+
+            esad_param_mark = px4.mark()
+            px4.command(
+                f"param set MAV_M_ESAD_I {TEST_MAVLINK_INSTANCE}"
+            )
+            px4.wait_for("MAV_M_ESAD_I:", esad_param_mark, 5.0)
+            esad_owner.mav.esad_arming_send(
+                int(time.time() * 1_000_000),
+                1,
+                0xDEADBEEF,
+                0,
+                0,
+            )
+            expect_no_matching_message(
+                esad_output,
+                "self-output ESAD forwarding",
+                lambda message: message.get_type() == "ESAD_ARMING",
+            )
+        finally:
+            px4.command("param set MAV_M_ESAD_I -1")
+            time.sleep(0.3)
+            esad_output_transport.close()
+            esad_owner_transport.close()
+        record(
+            results,
+            "separate_route_esad_first_message_forwarding_and_denials",
+            started,
+            "owner control-link heartbeat registered on the separate cue route; "
+            "the first authorized ESAD_ARMING reached only output instance 1 "
+            "with source and payload intact; wrong identity and self output "
+            f"were denied{' together with a wrong signed link' if signed else ''}",
+        )
+
+        started = time.monotonic()
+        observer_transport = UdpTransport(
+            ("127.0.0.1", OBSERVER_AAGS_UDP_PORT),
+            ("127.0.0.1", TEST_PX4_UDP_PORT),
+        )
+        observer_endpoint = Endpoint(
+            dialect,
+            observer_transport,
+            250,
+            SOURCE_COMPONENT,
+            SIGNING_KEY if signed else None,
+            7,
+        )
+        exact_owner_endpoint, exact_owner_transport = connect_owner_endpoint(
+            dialect, signed
+        )
+        owner_ftp_path = rootfs / "aags-owner-authority.txt"
+        observer_ftp_path = rootfs / "aags-observer-denied.txt"
+        try:
+            establish_udp_peer(observer_endpoint)
+            wait_for_heartbeat(observer_endpoint)
+            wait_for_heartbeat(exact_owner_endpoint)
+
+            observer_status_cue_id = 798
+            observer_status_cue = make_cue(
+                endpoint,
+                observer_status_cue_id,
+                int(time.time() * 1_000_000),
+                "observer status",
+                cue_type=2,
+            )
+            endpoint.mav.send(observer_status_cue)
+            assert_ack(
+                wait_for_ack(
+                    endpoint,
+                    dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                    observer_status_cue_id,
+                ),
+                dialect.MAVLINK_M_ACK_RECEIVED,
+                "stored pending",
+            )
+            observer_snapshot = wait_for_owner_snapshot(
+                observer_endpoint, observer_status_cue_id, "AAGS_PEND"
+            )
+            if observer_snapshot["source"] != (
+                SOURCE_SYSTEM << 8
+            ) | SOURCE_COMPONENT:
+                raise AcceptanceFailure(
+                    "read-only observer did not receive correlated cue status"
+                )
+            send_owner_decision(
+                exact_owner_endpoint, observer_status_cue_id, False
+            )
+            wait_for_command_ack(
+                exact_owner_endpoint, dialect.MAV_RESULT_ACCEPTED
+            )
+            assert_ack(
+                wait_for_ack(
+                    endpoint,
+                    dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                    observer_status_cue_id,
+                ),
+                dialect.MAVLINK_M_ACK_REJECTED,
+                "local operator rejected",
+            )
+
+            request_command = dialect.MAV_CMD_REQUEST_MESSAGE
+            exact_owner_endpoint.mav.command_long_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                request_command,
+                0,
+                dialect.MAVLINK_MSG_ID_AUTOPILOT_VERSION,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            wait_for_matching_message(
+                exact_owner_endpoint,
+                "owner COMMAND_ACK",
+                lambda message: (
+                    message.get_type() == "COMMAND_ACK"
+                    and message.command == request_command
+                ),
+            )
+
+            exact_owner_endpoint.mav.mission_count_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                0,
+                dialect.MAV_MISSION_TYPE_MISSION,
+            )
+            wait_for_matching_message(
+                exact_owner_endpoint,
+                "owner MISSION_ACK",
+                lambda message: (
+                    message.get_type() == "MISSION_ACK"
+                    and message.get_srcSystem() == VEHICLE_SYSTEM
+                ),
+            )
+
+            parameter_name = fixed_text("MAV_M_INT_RAD", 16)
+            exact_owner_endpoint.mav.param_set_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                parameter_name,
+                26.0,
+                dialect.MAV_PARAM_TYPE_REAL32,
+            )
+            wait_for_matching_message(
+                exact_owner_endpoint,
+                "owner PARAM_VALUE",
+                lambda message: (
+                    message.get_type() == "PARAM_VALUE"
+                    and text_field(message.param_id) == "MAV_M_INT_RAD"
+                    and abs(float(message.param_value) - 26.0) < 0.01
+                ),
+            )
+
+            exact_owner_endpoint.mav.file_transfer_protocol_send(
+                0,
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                mavftp_create_payload(1, owner_ftp_path.name),
+            )
+            wait_for_matching_message(
+                exact_owner_endpoint,
+                "owner MAVFTP create response",
+                lambda message: (
+                    message.get_type() == "FILE_TRANSFER_PROTOCOL"
+                    and message.get_srcSystem() == VEHICLE_SYSTEM
+                ),
+            )
+            if not owner_ftp_path.is_file():
+                raise AcceptanceFailure(
+                    "owner MAVFTP create did not write the requested file"
+                )
+
+            owner_timesync_token = 8_675_309
+            for timesync_attempt in range(3):
+                drain(exact_owner_endpoint, 0.1)
+                exact_owner_endpoint.mav.timesync_send(0, owner_timesync_token)
+                try:
+                    wait_for_matching_message(
+                        exact_owner_endpoint,
+                        "owner TIMESYNC response",
+                        lambda message: (
+                            message.get_type() == "TIMESYNC"
+                            and message.ts1 == owner_timesync_token
+                        ),
+                        timeout=2.0,
+                    )
+                    break
+
+                except AcceptanceFailure:
+                    if timesync_attempt == 2:
+                        raise
+
+            ignored = 65535
+            exact_owner_endpoint.mav.rc_channels_override_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                ignored,
+                ignored,
+                ignored,
+                ignored,
+                1500,
+                ignored,
+                ignored,
+                ignored,
+            )
+            time.sleep(0.3)
+            owner_rc = px4.input_rc_status()
+            if "input_source: 6" not in owner_rc or not re.search(
+                r"values:\s*\[[^\]]*\b1500\b", owner_rc
+            ):
+                raise AcceptanceFailure(
+                    "exact owner RC override did not reach input_rc\n" + owner_rc
+                )
+
+            drain(observer_endpoint)
+            observer_endpoint.mav.command_long_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                request_command,
+                0,
+                dialect.MAVLINK_MSG_ID_AUTOPILOT_VERSION,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            expect_no_matching_message(
+                observer_endpoint,
+                "observer COMMAND_ACK",
+                lambda message: (
+                    message.get_type() == "COMMAND_ACK"
+                    and message.command == request_command
+                ),
+            )
+
+            observer_endpoint.mav.mission_count_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                0,
+                dialect.MAV_MISSION_TYPE_MISSION,
+            )
+            expect_no_matching_message(
+                observer_endpoint,
+                "observer MISSION_ACK",
+                lambda message: message.get_type() == "MISSION_ACK",
+            )
+
+            observer_endpoint.mav.param_set_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                parameter_name,
+                99.0,
+                dialect.MAV_PARAM_TYPE_REAL32,
+            )
+            expect_no_matching_message(
+                observer_endpoint,
+                "observer PARAM_VALUE",
+                lambda message: (
+                    message.get_type() == "PARAM_VALUE"
+                    and text_field(message.param_id) == "MAV_M_INT_RAD"
+                ),
+            )
+
+            observer_endpoint.mav.file_transfer_protocol_send(
+                0,
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                mavftp_create_payload(2, observer_ftp_path.name),
+            )
+            expect_no_matching_message(
+                observer_endpoint,
+                "observer MAVFTP write response",
+                lambda message: (
+                    message.get_type() == "FILE_TRANSFER_PROTOCOL"
+                    and message.get_srcSystem() == VEHICLE_SYSTEM
+                ),
+            )
+            if observer_ftp_path.exists():
+                raise AcceptanceFailure(
+                    "read-only observer created a file through MAVFTP"
+                )
+
+            observer_timesync_token = 8_675_310
+            observer_endpoint.mav.timesync_send(0, observer_timesync_token)
+            expect_no_matching_message(
+                observer_endpoint,
+                "observer TIMESYNC response",
+                lambda message: (
+                    message.get_type() == "TIMESYNC"
+                    and message.ts1 == observer_timesync_token
+                ),
+            )
+
+            observer_endpoint.mav.rc_channels_override_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                ignored,
+                ignored,
+                ignored,
+                ignored,
+                1800,
+                ignored,
+                ignored,
+                ignored,
+            )
+            time.sleep(0.3)
+            observer_rc = px4.input_rc_status()
+            values_match = re.search(
+                r"values:\s*\[([^\]]+)\]", observer_rc
+            )
+            values = (
+                [
+                    int(value.strip())
+                    for value in values_match.group(1).split(",")
+                ]
+                if values_match is not None
+                else []
+            )
+            if (
+                "input_source: 6" not in observer_rc
+                or len(values) < 5
+                or values[4] != 1500
+            ):
+                raise AcceptanceFailure(
+                    "observer RC override changed the owner RC input\n"
+                    + observer_rc
+                )
+
+            radius_status = px4.parameter_status("MAV_M_INT_RAD")
+            if re.search(
+                r"\bMAV_M_INT_RAD\b[^\n]*:\s*26(?:\.0+)?\s*$",
+                radius_status,
+                re.MULTILINE,
+            ) is None:
+                raise AcceptanceFailure(
+                    "observer PARAM_SET changed MAV_M_INT_RAD\n"
+                    + radius_status
+                )
+            exact_owner_endpoint.mav.param_set_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                parameter_name,
+                25.0,
+                dialect.MAV_PARAM_TYPE_REAL32,
+            )
+            wait_for_matching_message(
+                exact_owner_endpoint,
+                "owner parameter restore",
+                lambda message: (
+                    message.get_type() == "PARAM_VALUE"
+                    and text_field(message.param_id) == "MAV_M_INT_RAD"
+                    and abs(float(message.param_value) - 25.0) < 0.01
+                ),
+            )
+        finally:
+            if owner_ftp_path.exists():
+                owner_ftp_path.unlink()
+            if observer_ftp_path.exists():
+                observer_ftp_path.unlink()
+            exact_owner_transport.close()
+            observer_transport.close()
+        record(
+            results,
+            "learned_observer_is_read_only_while_exact_owner_controls",
+            started,
+            "observer retained heartbeat and receiver-status fanout but COMMAND_LONG, mission, PARAM_SET, MAVFTP write, TIMESYNC, and RC override were silent; exact owner equivalents succeeded",
+        )
+
+        started = time.monotonic()
+        for command in (
+            "param set MAV_M_SAME_EP 1",
+            f"param set MAV_M_CTL_INST {TEST_MAVLINK_INSTANCE}",
+            f"param set MAV_M_CTL_SYS {OWNER_SYSTEM}",
+            f"param set MAV_M_CTL_CMP {OWNER_COMPONENT + 1}",
+            "param set MAV_M_CTL_LNK 7",
+        ):
+            px4.command(command)
+        time.sleep(0.75)
+        shared_owner_transport = UdpTransport(
+            ("127.0.0.1", SHARED_OWNER_AAGS_UDP_PORT),
+            ("127.0.0.1", TEST_PX4_UDP_PORT),
+        )
+        unrelated_transport = UdpTransport(
+            ("127.0.0.1", UNRELATED_AAGS_UDP_PORT),
+            ("127.0.0.1", TEST_PX4_UDP_PORT),
+        )
+        shared_owner = Endpoint(
+            dialect,
+            shared_owner_transport,
+            OWNER_SYSTEM,
+            OWNER_COMPONENT + 1,
+            SIGNING_KEY if signed else None,
+            7,
+        )
+        unrelated = Endpoint(
+            dialect,
+            unrelated_transport,
+            249,
+            OWNER_COMPONENT + 2,
+            SIGNING_KEY if signed else None,
+            7,
+        )
+        try:
+            establish_udp_peer(shared_owner)
+            wait_for_heartbeat(shared_owner)
+            shared_owner.mav.command_long_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                dialect.MAV_CMD_REQUEST_MESSAGE,
+                0,
+                dialect.MAVLINK_MSG_ID_AUTOPILOT_VERSION,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            wait_for_matching_message(
+                shared_owner,
+                "different-component shared-route owner COMMAND_ACK",
+                lambda message: (
+                    message.get_type() == "COMMAND_ACK"
+                    and message.command == dialect.MAV_CMD_REQUEST_MESSAGE
+                ),
+            )
+            establish_udp_peer(unrelated)
+            time.sleep(0.5)
+            role_route_status = px4.mavlink_status()
+            role_route_match = route_pattern.search(role_route_status)
+            if role_route_match is None:
+                raise AcceptanceFailure(
+                    "shared-role route disappeared\n" + role_route_status
+                )
+            role_route_section = role_route_status[role_route_match.start():]
+            if (
+                f"GCS {OWNER_SYSTEM}/{OWNER_COMPONENT + 1} "
+                f"127.0.0.1:{SHARED_OWNER_AAGS_UDP_PORT}"
+                not in role_route_section
+                or f"GCS 249/{OWNER_COMPONENT + 2}" in role_route_section
+            ):
+                raise AcceptanceFailure(
+                    "shared route did not admit only source/control components\n"
+                    + role_route_section
+                )
+        finally:
+            unrelated_transport.close()
+            shared_owner_transport.close()
+        for command in (
+            "param set MAV_M_SAME_EP 0",
+            f"param set MAV_M_CTL_INST {CONTROL_MAVLINK_INSTANCE}",
+            f"param set MAV_M_CTL_SYS {OWNER_SYSTEM}",
+            f"param set MAV_M_CTL_CMP {OWNER_COMPONENT}",
+            f"param set MAV_M_CTL_LNK {CONTROL_SIGNING_LINK_ID}",
+        ):
+            px4.command(command)
+        time.sleep(0.75)
+        record(
+            results,
+            "shared_route_admits_only_source_and_control_components",
+            started,
+            "one route admitted source component 190 and owner component 191 with the selected signing link, enabled owner generic ingress, and rejected unrelated component 192",
         )
 
         started = time.monotonic()
@@ -990,7 +1940,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
                 0,
                 0,
             )
-            wait_for_command_ack(endpoint, dialect.MAV_RESULT_DENIED)
+            expect_no_command_ack(endpoint)
             px4.wait_target_status(
                 ["instance_id: 731", "state: 1", "prompt: True"], 3.0
             )
@@ -1019,7 +1969,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
                 0,
                 0,
             )
-            wait_for_command_ack(owner_endpoint, dialect.MAV_RESULT_DENIED)
+            expect_no_command_ack(owner_endpoint)
             px4.wait_target_status(
                 ["instance_id: 731", "state: 1", "prompt: True"], 3.0
             )
@@ -1027,7 +1977,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
                 results,
                 "owner_decision_authority_isolation",
                 started,
-                "owner identity on wrong instance and cue-sender identity on owner instance were denied; cue stayed Pending",
+                "endpoint identity conflicts were dropped before COMMAND_ACK; cue stayed Pending",
             )
 
             started = time.monotonic()
@@ -1348,6 +2298,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         )
 
         started = time.monotonic()
+        establish_udp_peer(endpoint)
         stale_source_cue = make_cue(
             endpoint,
             758,
@@ -1393,6 +2344,74 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             "level_movement_requires_fresh_cue_source",
             started,
             "level travel from a source silent for 15 seconds stayed Pending and issued no navigation command",
+        )
+
+        started = time.monotonic()
+        heartbeat_level_cue_id = 765
+        heartbeat_level_cue = make_cue(
+            endpoint,
+            heartbeat_level_cue_id,
+            int(time.time() * 1_000_000),
+            "heartbeat level",
+        )
+        endpoint.send_frozen(heartbeat_level_cue)
+        assert_ack(
+            wait_for_ack(
+                endpoint,
+                dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                heartbeat_level_cue_id,
+            ),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending",
+        )
+        heartbeat_count = sustain_source_with_heartbeats(endpoint, 16.5)
+        px4.wait_target_status(
+            [
+                f"instance_id: {heartbeat_level_cue_id}",
+                "state: 1",
+                "source_fresh: True",
+                "command_flags: 0",
+            ],
+            3.0,
+        )
+        px4.command(
+            f"mavlink task accept {heartbeat_level_cue_id} 53001"
+        )
+        assert_ack(
+            wait_for_ack(
+                endpoint,
+                dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                heartbeat_level_cue_id,
+            ),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "local operator accepted",
+        )
+        px4.wait_target_status(
+            [
+                f"instance_id: {heartbeat_level_cue_id}",
+                "state: 2",
+                "source_fresh: True",
+                "command_flags: 1",
+            ],
+            3.0,
+        )
+        px4.command(
+            f"mavlink task reject {heartbeat_level_cue_id} 53001"
+        )
+        assert_ack(
+            wait_for_ack(
+                endpoint,
+                dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                heartbeat_level_cue_id,
+            ),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator aborted",
+        )
+        record(
+            results,
+            "source_heartbeats_sustain_pending_level_acceptance",
+            started,
+            f"{heartbeat_count} authorized GCS heartbeats, with no task retransmit, kept a pending cue fresh beyond 15 seconds and permitted level acceptance",
         )
 
         started = time.monotonic()
@@ -1587,6 +2606,105 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
 
         started = time.monotonic()
         px4.command("param set MAV_M_ACTION 2")
+        px4.command("param set MAV_M_INT_CLR 30")
+        px4.command("param set MAV_M_INT_DWL 60")
+        time.sleep(1.0)
+        terrain_status = px4.global_position_status()
+        terrain_valid = "terrain_alt_valid: True" in terrain_status
+        terrain_base_altitude = output_float(terrain_status, "alt")
+        terrain_blocked_cue = make_cue(
+            endpoint,
+            766,
+            int(time.time() * 1_000_000),
+            "terrain required",
+            alt_msl=terrain_base_altitude + 10.0,
+        )
+        endpoint.mav.send(terrain_blocked_cue)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 766),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending pilot decision",
+        )
+        px4.command("mavlink task accept 766 53001")
+        terrain_blocked_ack = wait_for_ack(
+            endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 766
+        )
+        assert_ack(
+            terrain_blocked_ack,
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "MAV_M_INT_CLR",
+        )
+        terrain_denial = text_field(terrain_blocked_ack.reason)
+        if (
+            "requires fresh terrain and HAGL" not in terrain_denial
+            and "MAV_M_INT_CLR terrain clearance" not in terrain_denial
+        ):
+            raise AcceptanceFailure(
+                "nonnegative terrain policy did not report an explicit "
+                f"terrain/HAGL denial: {terrain_denial!r}"
+            )
+        px4.wait_target_status(
+            ["instance_id: 766", "state: 1", "command_flags: 0", "prompt: True"],
+            3.0,
+        )
+        px4.command("mavlink task reject 766 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 766),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator rejected",
+        )
+
+        px4.command("param set MAV_M_INT_CLR -1")
+        time.sleep(0.5)
+        terrain_override_cue = make_cue(
+            endpoint,
+            767,
+            int(time.time() * 1_000_000),
+            "surveyed override",
+            alt_msl=terrain_base_altitude + 10.0,
+        )
+        endpoint.mav.send(terrain_override_cue)
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 767),
+            dialect.MAVLINK_M_ACK_RECEIVED,
+            "stored pending pilot decision",
+        )
+        px4.command("mavlink task accept 767 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 767),
+            dialect.MAVLINK_M_ACK_ACCEPTED,
+            "local operator accepted active target",
+        )
+        terrain_override_status = px4.wait_target_status(
+            ["instance_id: 767", "state: 2", "command_flags: 3"],
+            3.0,
+        )
+        if re.search(
+            r"\bintercept_phase:\s*[12]\b", terrain_override_status
+        ) is None:
+            raise AcceptanceFailure(
+                "fresh effect-2 acceptance did not begin after the explicit "
+                "MAV_M_INT_CLR=-1 override\n" + terrain_override_status
+            )
+        px4.command("mavlink task reject 767 53001")
+        assert_ack(
+            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 767),
+            dialect.MAVLINK_M_ACK_REJECTED,
+            "local operator aborted active target",
+        )
+        px4.command("param set MAV_M_INT_DWL 3")
+        record(
+            results,
+            "intercept_terrain_gate_requires_fresh_decision_after_override",
+            started,
+            "MAV_M_INT_CLR=30 denied effect-2 and kept cue 766 Pending "
+            f"(terrain valid={terrain_valid}, reason={terrain_denial}); a "
+            "fresh cue and decision after explicit -1 began Intercept",
+        )
+
+        started = time.monotonic()
+        px4.command("param set MAV_M_ACTION 2")
+        px4.command("param set MAV_M_INT_CLR -1")
         px4.command("param set MAV_M_INT_DWL 60")
         px4.command("param set GF_ACTION 2")
         px4.command("param set GF_MAX_HOR_DIST 10000")
@@ -1670,7 +2788,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             )
         no_fence_command = px4.vehicle_command_status()
         if (
-            re.search(r"\bcommand:\s*100001\b", no_fence_command) is None
+            re.search(r"\bcommand:\s*100002\b", no_fence_command) is None
             or abs(output_float(no_fence_command, "param7") - no_fence_altitude) > 0.2
         ):
             raise AcceptanceFailure(
@@ -1692,18 +2810,22 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
 
         started = time.monotonic()
         px4.command("param set MAV_M_ACTION 2")
+        px4.command("param set MAV_M_INT_CLR -1")
         px4.command("param set MAV_M_INT_DWL 60")
         px4.command("param set GF_ACTION 1")
         time.sleep(1.0)
-        intercept_base_altitude = output_float(
-            px4.global_position_status(), "alt"
-        )
+        intercept_position = px4.global_position_status()
+        intercept_base_latitude = output_float(intercept_position, "lat")
+        intercept_base_longitude = output_float(intercept_position, "lon")
+        intercept_base_altitude = output_float(intercept_position, "alt")
         intercept_altitude = intercept_base_altitude + 12.5
         intercept_cue = make_cue(
             endpoint,
             746,
             int(time.time() * 1_000_000),
             "explicit intercept",
+            lat=int(round((intercept_base_latitude + 0.001) * 1e7)),
+            lon=int(round(intercept_base_longitude * 1e7)),
             alt_msl=intercept_altitude,
         )
         endpoint.mav.send(intercept_cue)
@@ -1736,7 +2858,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             r"\btimestamp:\s*(\d+)\b", intercept_command
         )
         if (
-            re.search(r"\bcommand:\s*100001\b", intercept_command) is None
+            re.search(r"\bcommand:\s*100002\b", intercept_command) is None
             or first_intercept_timestamp is None
             or intercept_token_low != int(intercept_token_low)
             or intercept_token_high != int(intercept_token_high)
@@ -1765,6 +2887,77 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
                 "finite-altitude intercept emitted a duplicate command before crossing\n"
                 + premature_command
             )
+        record(
+            results,
+            "trusted_source_intercept_starts_guarded_approach",
+            started,
+            "local mode 2 finite cue began one internal exact fly-through at cue altitude and emitted no duplicate command",
+        )
+
+        started = time.monotonic()
+        intercept_heartbeat_count = sustain_source_with_heartbeats(
+            endpoint, 16.5
+        )
+        sustained_intercept_status = px4.wait_target_status(
+            [
+                "instance_id: 746",
+                "state: 2",
+                "source_fresh: True",
+                "command_flags: 3",
+            ],
+            3.0,
+        )
+        if re.search(
+            r"\bintercept_phase:\s*[12]\b", sustained_intercept_status
+        ) is None:
+            raise AcceptanceFailure(
+                "authorized source heartbeats did not retain active Intercept "
+                "transit/dwell beyond 15 seconds\n" + sustained_intercept_status
+            )
+        sustained_intercept_command = px4.vehicle_command_status()
+        sustained_intercept_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", sustained_intercept_command
+        )
+        if (
+            sustained_intercept_timestamp is None
+            or int(sustained_intercept_timestamp.group(1))
+            != int(first_intercept_timestamp.group(1))
+            or re.search(
+                r"\bcommand:\s*100002\b", sustained_intercept_command
+            )
+            is None
+        ):
+            raise AcceptanceFailure(
+                "heartbeat-sustained Intercept emitted a duplicate or changed "
+                "navigation command\n" + sustained_intercept_command
+            )
+        silent_intercept_status = px4.wait_target_status(
+            [
+                "instance_id: 746",
+                "state: 2",
+                "source_fresh: False",
+                "intercept_phase: 4",
+            ],
+            20.0,
+        )
+        stopped_intercept_command = px4.vehicle_command_status()
+        stopped_intercept_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", stopped_intercept_command
+        )
+        if (
+            stopped_intercept_timestamp is None
+            or int(stopped_intercept_timestamp.group(1))
+            <= int(sustained_intercept_timestamp.group(1))
+            or re.search(r"\bcommand:\s*192\b", stopped_intercept_command)
+            is None
+        ):
+            raise AcceptanceFailure(
+                "silent active Intercept did not publish its safety hold\n"
+                + stopped_intercept_command
+                + silent_intercept_status
+            )
+        establish_udp_peer(endpoint)
+        time.sleep(0.25)
         px4.command("mavlink task reject 746 53001")
         assert_ack(
             wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 746),
@@ -1774,9 +2967,9 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         px4.command("param set MAV_M_INT_DWL 3")
         record(
             results,
-            "trusted_source_intercept_starts_guarded_approach",
+            "source_heartbeats_sustain_active_intercept",
             started,
-            "local mode 2 finite cue began one internal exact fly-through at cue altitude and emitted no duplicate command",
+            f"{intercept_heartbeat_count} authorized GCS heartbeats kept Intercept active beyond 15 seconds without a task retransmit or duplicate command; later source silence aborted it to Hold",
         )
 
         started = time.monotonic()
@@ -1814,7 +3007,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             r"\btimestamp:\s*(\d+)\b", radius_independent_command
         )
         if (
-            re.search(r"\bcommand:\s*100001\b", radius_independent_command) is None
+            re.search(r"\bcommand:\s*100002\b", radius_independent_command) is None
             or radius_independent_timestamp is None
             or (
                 abs(output_float(radius_independent_command, "param1") - 500.0) < 0.001
@@ -1841,7 +3034,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             r"\btimestamp:\s*(\d+)\b", completion_command
         )
         if (
-            re.search(r"\bcommand:\s*100001\b", completion_command) is None
+            re.search(r"\bcommand:\s*100002\b", completion_command) is None
             or completion_timestamp is None
             or int(completion_timestamp.group(1))
             != int(radius_independent_timestamp.group(1))
@@ -2163,7 +3356,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             )
             if (
                 re.search(
-                    r"\bcommand:\s*100001\b", owner_intercept_initial_command
+                    r"\bcommand:\s*100002\b", owner_intercept_initial_command
                 )
                 is None
                 or owner_token_low != int(owner_token_low)
@@ -2201,7 +3394,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             )
             if (
                 re.search(
-                    r"\bcommand:\s*100001\b", owner_intercept_completion_command
+                    r"\bcommand:\s*100002\b", owner_intercept_completion_command
                 )
                 is None
                 or owner_intercept_completion_timestamp is None
@@ -2257,8 +3450,12 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         time.sleep(0.3)
 
         px4.command("commander land")
+        time.sleep(1.0)
         px4.wait_land_detected(["landed: True"], 90.0)
-        px4.command("commander disarm")
+        # This is fixture cleanup, not a disarm-policy test. A just-published
+        # landing sample can race Commander's land-state subscription, so force
+        # the already-landed SIH vehicle to a deterministic disarmed baseline.
+        px4.command("commander disarm -f")
         px4.wait_vehicle_status(["arming_state: 1"], 5.0)
         px4.command(f"param set MAV_M_MAX_AGE {max_age}")
         px4.command("param save")
@@ -2274,6 +3471,9 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             int(time.time() * 1_000_000),
             "stale identity",
         )
+        # Landing and disarming can exceed the bounded UDP peer timeout. Renew
+        # the exact GCS tuple without refreshing the cached target identity.
+        establish_udp_peer(endpoint)
         endpoint.mav.send(stale_identity_cue)
         assert_ack(
             wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 743),
@@ -2352,6 +3552,15 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
 
         started = time.monotonic()
         ignored = 65535
+        input_rc_before = px4.input_rc_status()
+        input_rc_before_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", input_rc_before
+        )
+        if input_rc_before_timestamp is None:
+            raise AcceptanceFailure(
+                "missing retained input_rc baseline before remote override probes\n"
+                + input_rc_before
+            )
         endpoint.mav.rc_channels_override_send(
             VEHICLE_SYSTEM,
             VEHICLE_COMPONENT,
@@ -2379,15 +3588,15 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         )
         time.sleep(0.3)
         input_rc = px4.input_rc_status()
-        values_match = re.search(r"values:\s*\[([^\]]+)\]", input_rc)
-        values = (
-            [int(value.strip()) for value in values_match.group(1).split(",")]
-            if values_match is not None
-            else []
+        input_rc_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", input_rc
         )
-        if "input_source: 6" not in input_rc or len(values) < 5 or values[4] != 1800:
+        if (
+            input_rc_timestamp is None
+            or input_rc_timestamp.group(1) != input_rc_before_timestamp.group(1)
+        ):
             raise AcceptanceFailure(
-                "RC override did not reach input_rc as MAVLink channel 5=1800\n"
+                "non-owner RC center-to-high override unexpectedly changed input_rc\n"
                 + input_rc
             )
         endpoint.mav.send(handover)
@@ -2423,15 +3632,15 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         )
         time.sleep(0.3)
         input_rc = px4.input_rc_status()
-        values_match = re.search(r"values:\s*\[([^\]]+)\]", input_rc)
-        values = (
-            [int(value.strip()) for value in values_match.group(1).split(",")]
-            if values_match is not None
-            else []
+        input_rc_timestamp = re.search(
+            r"\btimestamp:\s*(\d+)\b", input_rc
         )
-        if "input_source: 6" not in input_rc or len(values) < 5 or values[4] != 1200:
+        if (
+            input_rc_timestamp is None
+            or input_rc_timestamp.group(1) != input_rc_before_timestamp.group(1)
+        ):
             raise AcceptanceFailure(
-                "RC override did not reach input_rc as MAVLink channel 5=1200\n"
+                "non-owner RC center-to-low override unexpectedly changed input_rc\n"
                 + input_rc
             )
         endpoint.mav.send(handover)
@@ -2444,7 +3653,8 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             results,
             "remote_rc_override_cannot_accept",
             started,
-            "MAVLink RC center-to-high and center-to-low overrides left handover pending",
+            "non-owner MAVLink RC center-to-high and center-to-low overrides were "
+            "blocked before input_rc and left the handover Pending",
         )
 
         state_file = rootfs / "mavlink_m_state.bin"
@@ -2456,7 +3666,9 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         drain(endpoint)
         restart_mark = px4.start()
         px4.add_test_link()
-        establish_udp_peer(endpoint)
+        for _ in range(4):
+            establish_udp_peer(endpoint)
+            time.sleep(0.25)
         wait_for_heartbeat(endpoint)
         px4.wait_for("restored MAVLink-M assignment state", restart_mark, 5.0)
         endpoint.mav.send(handover)
@@ -2639,9 +3851,13 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             20.0,
         )
 
+        wildcard_transport = UdpTransport(
+            ("127.0.0.1", WILDCARD_AAGS_UDP_PORT),
+            ("127.0.0.1", TEST_PX4_UDP_PORT),
+        )
         wildcard_source = Endpoint(
             dialect,
-            transport,
+            wildcard_transport,
             WILDCARD_SOURCE_SYSTEM,
             SOURCE_COMPONENT,
             SIGNING_KEY if signed else None,
@@ -2649,12 +3865,14 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         )
         wildcard_wrong_component = Endpoint(
             dialect,
-            transport,
+            wildcard_transport,
             WILDCARD_SOURCE_SYSTEM,
             SOURCE_COMPONENT + 1,
             SIGNING_KEY if signed else None,
             7,
         )
+        establish_udp_peer(wildcard_source)
+        drain(wildcard_source)
         wildcard_cue_id = 761
         wildcard_cue = make_cue(
             wildcard_source,
@@ -2664,7 +3882,10 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         )
         wildcard_source.send_frozen(wildcard_cue)
         wildcard_received = wait_for_ack(
-            endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, wildcard_cue_id
+            wildcard_source,
+            dialect.MAVLINK_MSG_ID_TARGET_CUE,
+            wildcard_cue_id,
+            origin_system=WILDCARD_SOURCE_SYSTEM,
         )
         assert_ack(
             wildcard_received,
@@ -2689,7 +3910,12 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             )
         )
         assert_ack(
-            wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, wildcard_cue_id),
+            wait_for_ack(
+                endpoint,
+                dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                wildcard_cue_id,
+                origin_system=SOURCE_SYSTEM,
+            ),
             dialect.MAVLINK_M_ACK_FAILED,
             "ambiguous across sources",
         )
@@ -2703,7 +3929,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
                 cue_type=2,
             )
         )
-        expect_no_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 762)
+        expect_no_ack(wildcard_source, dialect.MAVLINK_MSG_ID_TARGET_CUE, 762)
 
         wrong_route_transport = UdpTransport(
             ("127.0.0.1", FORWARD_INGRESS_TEST_UDP_PORT),
@@ -2734,6 +3960,10 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             ("127.0.0.1", CONTROL_AAGS_UDP_PORT),
             ("127.0.0.1", CONTROL_PX4_UDP_PORT),
         )
+        wildcard_reject_transport = UdpTransport(
+            ("127.0.0.1", WILDCARD_REJECT_AAGS_UDP_PORT),
+            ("127.0.0.1", CONTROL_PX4_UDP_PORT),
+        )
         wildcard_owner = Endpoint(
             dialect,
             wildcard_owner_transport,
@@ -2752,7 +3982,7 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         )
         wildcard_reject_owner = Endpoint(
             dialect,
-            wildcard_owner_transport,
+            wildcard_reject_transport,
             WILDCARD_REJECT_SYSTEM,
             OWNER_COMPONENT,
             SIGNING_KEY if signed else None,
@@ -2760,13 +3990,39 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         )
         try:
             establish_udp_peer(wildcard_owner)
+            wildcard_owner.mav.command_long_send(
+                VEHICLE_SYSTEM,
+                VEHICLE_COMPONENT,
+                dialect.MAV_CMD_REQUEST_MESSAGE,
+                0,
+                dialect.MAVLINK_MSG_ID_AUTOPILOT_VERSION,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            wait_for_matching_message(
+                wildcard_owner,
+                "wildcard owner COMMAND_ACK",
+                lambda message: (
+                    message.get_type() == "COMMAND_ACK"
+                    and message.command == dialect.MAV_CMD_REQUEST_MESSAGE
+                ),
+            )
             wait_for_owner_snapshot(wildcard_owner, wildcard_cue_id, "AAGS_PEND")
             send_owner_decision(wrong_owner_component, wildcard_cue_id, True)
-            wait_for_command_ack(wildcard_owner, dialect.MAV_RESULT_DENIED)
+            expect_no_command_ack(wildcard_owner)
             send_owner_decision(wildcard_owner, wildcard_cue_id, True)
             wait_for_command_ack(wildcard_owner, dialect.MAV_RESULT_ACCEPTED)
             assert_ack(
-                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, wildcard_cue_id),
+                wait_for_ack(
+                    wildcard_source,
+                    dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                    wildcard_cue_id,
+                    origin_system=WILDCARD_SOURCE_SYSTEM,
+                ),
                 dialect.MAVLINK_M_ACK_ACCEPTED,
                 "local operator accepted",
                 WILDCARD_SOURCE_SYSTEM,
@@ -2792,25 +4048,38 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
                         "wildcard-authorized movement did not preserve the actual source\n"
                         + wildcard_command
                     )
+            establish_udp_peer(wildcard_reject_owner)
+            time.sleep(0.1)
+            drain(wildcard_reject_owner)
             send_owner_decision(wildcard_reject_owner, wildcard_cue_id, False)
-            wait_for_command_ack(wildcard_owner, dialect.MAV_RESULT_ACCEPTED)
+            wait_for_command_ack(
+                wildcard_reject_owner, dialect.MAV_RESULT_ACCEPTED
+            )
             assert_ack(
-                wait_for_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, wildcard_cue_id),
+                wait_for_ack(
+                    wildcard_source,
+                    dialect.MAVLINK_MSG_ID_TARGET_CUE,
+                    wildcard_cue_id,
+                    origin_system=WILDCARD_SOURCE_SYSTEM,
+                ),
                 dialect.MAVLINK_M_ACK_REJECTED,
                 "local operator aborted",
                 WILDCARD_SOURCE_SYSTEM,
             )
         finally:
+            wildcard_reject_transport.close()
             wildcard_owner_transport.close()
 
         px4.command(f"param set MAV_M_SRC_SYS {SOURCE_SYSTEM}")
         px4.command(f"param set MAV_M_CTL_SYS {OWNER_SYSTEM}")
         time.sleep(0.75)
+        wildcard_transport.close()
+        wildcard_transport = None
         record(
             results,
             "system_wildcards_preserve_component_and_route",
             started,
-            "system 253 published level movement on the cue route, systems 252 and 251 accepted and aborted it on the owner route, and wrong component, wrong route, and ambiguous cue ID failed closed",
+            "system 253 published level movement on the cue route; wildcard owners used generic command and task control; wrong component, wrong route, and ambiguous cue ID failed closed",
         )
 
         started = time.monotonic()
@@ -2827,6 +4096,53 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             make_cue(endpoint, 750, int(time.time() * 1_000_000), "bad sys")
         )
         expect_no_ack(endpoint, dialect.MAVLINK_MSG_ID_TARGET_CUE, 750)
+        drain(endpoint)
+        endpoint.mav.command_long_send(
+            VEHICLE_SYSTEM,
+            VEHICLE_COMPONENT,
+            dialect.MAV_CMD_REQUEST_MESSAGE,
+            0,
+            dialect.MAVLINK_MSG_ID_AUTOPILOT_VERSION,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        expect_no_matching_message(
+            endpoint,
+            "generic COMMAND_ACK while selected source identity is invalid",
+            lambda message: (
+                message.get_type() == "COMMAND_ACK"
+                and message.command == dialect.MAV_CMD_REQUEST_MESSAGE
+            ),
+        )
+        endpoint.mav.param_set_send(
+            VEHICLE_SYSTEM,
+            VEHICLE_COMPONENT,
+            fixed_text("MAV_M_INT_RAD", 16),
+            99.0,
+            dialect.MAV_PARAM_TYPE_REAL32,
+        )
+        expect_no_matching_message(
+            endpoint,
+            "generic PARAM_VALUE while selected source identity is invalid",
+            lambda message: (
+                message.get_type() == "PARAM_VALUE"
+                and text_field(message.param_id) == "MAV_M_INT_RAD"
+            ),
+        )
+        invalid_route_radius = px4.parameter_status("MAV_M_INT_RAD")
+        if re.search(
+            r"\bMAV_M_INT_RAD\b[^\n]*:\s*25(?:\.0+)?\s*$",
+            invalid_route_radius,
+            re.MULTILINE,
+        ) is None:
+            raise AcceptanceFailure(
+                "invalid selected source identity exposed generic PARAM_SET\n"
+                + invalid_route_radius
+            )
         px4.restore_endpoint_parameter("MAV_M_SRC_SYS", SOURCE_SYSTEM)
         px4.set_invalid_endpoint_parameter("MAV_M_SRC_CMP", 446)
         endpoint.mav.send(
@@ -2846,7 +4162,9 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
             results,
             "corrupt_parameter_aliases_fail_closed",
             started,
-            "negative age corrected; -2/446 source IDs and instance 6 could not modulo-alias a valid endpoint",
+            "negative age corrected; -2/446 source IDs and instance 6 could "
+            "not modulo-alias a valid endpoint; invalid selected identity "
+            "also dropped generic command and parameter traffic",
         )
 
         return {
@@ -2868,6 +4186,8 @@ def run(binary: Path, etc: Path, rootfs: Path, max_age: int, signed: bool) -> di
         ) from error
     finally:
         px4.stop()
+        if wildcard_transport is not None:
+            wildcard_transport.close()
         transport.close()
 
 

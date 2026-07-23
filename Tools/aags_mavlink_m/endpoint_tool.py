@@ -197,6 +197,19 @@ class Endpoint:
         )
 
 
+def advertise_gcs(endpoint: Endpoint, registration_delay: float) -> None:
+    """Send the authenticated heartbeat required by Direct Fleet admission."""
+    endpoint.mav.heartbeat_send(
+        endpoint.dialect.MAV_TYPE_GCS,
+        endpoint.dialect.MAV_AUTOPILOT_INVALID,
+        0,
+        0,
+        0,
+    )
+    if registration_delay > 0.0:
+        time.sleep(registration_delay)
+
+
 def print_message(message) -> None:
     if message.get_type() == "MAVLINK_M_ACK":
         reason = text_field(message.reason)
@@ -347,6 +360,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-system", type=int, default=255)
     parser.add_argument("--source-component", type=int, default=190)
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument(
+        "--peer-registration-delay",
+        type=float,
+        default=0.3,
+        help="seconds to wait after the Direct Fleet GCS heartbeat",
+    )
     parser.add_argument("--signing-key", type=Path, help="32 raw bytes or 64 hexadecimal bytes")
     parser.add_argument("--signing-link-id", type=int, default=0)
     parser.add_argument("--retries", type=int, choices=range(0, 4), default=2,
@@ -404,6 +423,8 @@ def validate_args(args) -> None:
             raise ValueError(f"--{name.replace('_', '-')} must be 1..255")
     if not 0 <= args.signing_link_id <= 255:
         raise ValueError("--signing-link-id must be 0..255")
+    if not 0.0 <= args.peer_registration_delay <= 5.0:
+        raise ValueError("--peer-registration-delay must be 0..5 seconds")
     if args.command in ("cue", "handover"):
         if not -90.0 <= args.lat <= 90.0 or not -180.0 <= args.lon <= 180.0:
             raise ValueError("latitude/longitude out of WGS84 bounds")
@@ -463,6 +484,8 @@ def main() -> int:
             read_signing_key(args.signing_key), args.signing_link_id,
         )
         try:
+            if args.command in ("cue", "track", "handover"):
+                advertise_gcs(endpoint, args.peer_registration_delay)
             if args.command == "cue":
                 message_id, instance = send_cue(endpoint, args)
             elif args.command == "track":
