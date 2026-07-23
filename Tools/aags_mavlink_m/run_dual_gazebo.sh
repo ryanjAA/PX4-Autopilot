@@ -33,10 +33,12 @@ configure  Reassert and verify the owner IDs and test action permission
 attach  Attach an interactive terminal to both PX4 shells
 
 Port allocation:
-  SYSID 44: PX4 instance 43, simulator TCP 4603, local cue/owner UDP 18613,
-            observer UDP 18615
-  SYSID 45: PX4 instance 44, simulator TCP 4604, local cue/owner UDP 18614,
-            observer UDP 18616
+  SYSID 44: PX4 instance 43, simulator TCP 4603, Fleet UDP 18613
+  SYSID 45: PX4 instance 44, simulator TCP 4604, Fleet UDP 18614
+
+Each vehicle uses one MAVLink-M UDP instance. Both AAGS stations discover both
+vehicles through the bounded PX4 peer table. The old observer instances on
+18615 and 18616 are no longer started.
 
 Optional environment:
   AAGS_DUAL_GAZEBO_WORLD selects another Gazebo Classic world, such as
@@ -54,28 +56,64 @@ die() {
 	exit 1
 }
 
+related_sessions() {
+	tmux list-sessions -F '#{session_name}|#{session_group}' 2>/dev/null \
+		| awk -F '|' -v wanted="$SESSION" \
+			'$1 == wanted || $2 == wanted { print $1 }'
+}
+
+session_target() {
+	if tmux has-session -t "=$SESSION" 2>/dev/null; then
+		printf '%s\n' "$SESSION"
+		return 0
+	fi
+	local candidate
+	candidate="$(related_sessions | head -n 1)"
+	[[ -n "$candidate" ]] || return 1
+	printf '%s\n' "$candidate"
+}
+
 session_exists() {
-	tmux has-session -t "$SESSION" 2>/dev/null
+	session_target >/dev/null
 }
 
 window_exists() {
 	local window="$1"
-	tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null \
+	local target
+	target="$(session_target)" || return 1
+	tmux list-windows -t "=$target" -F '#{window_name}' 2>/dev/null \
 		| grep -Fxq "$window"
+}
+
+wait_for_px4_startup() {
+	local pane="$1"
+	local target output
+	target="$(session_target)" || return 1
+	for _ in {1..120}; do
+		output="$(tmux capture-pane -p -t "=$target:$pane" -S -180 2>/dev/null || true)"
+		if printf '%s\n' "$output" \
+			| grep -Fq 'Startup script returned successfully'; then
+			return 0
+		fi
+		sleep 0.25
+	done
+	return 1
 }
 
 status() {
 	if session_exists; then
-		echo "tmux session: $SESSION"
-		tmux list-panes -a -t "$SESSION" -F '#{session_name}:#{window_name} pid=#{pane_pid} command=#{pane_current_command}'
+		echo "tmux session group: $SESSION"
+		local target
+		target="$(session_target)"
+		tmux list-panes -s -t "=$target" -F '#{session_name}:#{window_name} pid=#{pane_pid} command=#{pane_current_command}'
+		echo "group sessions: $(related_sessions | paste -sd ',' -)"
 	else
 		echo "tmux session: stopped"
 	fi
 
 	lsof -nP \
 		-iTCP:4603 -iTCP:4604 \
-		-iUDP:18613 -iUDP:18614 \
-		-iUDP:18615 -iUDP:18616 2>/dev/null || true
+		-iUDP:18613 -iUDP:18614 2>/dev/null || true
 }
 
 stop() {
@@ -83,22 +121,29 @@ stop() {
 		echo "Dual Gazebo session is already stopped"
 		return 0
 	fi
+	local target gazebo_parent
+	target="$(session_target)"
 
 	for window in sys44 sys45; do
-		if tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -Fxq "$window"; then
-			tmux send-keys -t "$SESSION:$window" shutdown Enter
+		if tmux list-windows -t "=$target" -F '#{window_name}' | grep -Fxq "$window"; then
+			tmux send-keys -t "=$target:$window" shutdown Enter
 		fi
 	done
 
+	gazebo_parent="$(tmux display-message -p -t "=$target:gazebo" '#{pane_pid}' 2>/dev/null || true)"
 	for _ in {1..20}; do
-		if ! pgrep -P "$(tmux display-message -p -t "$SESSION:gazebo" '#{pane_pid}')" gzserver >/dev/null 2>&1; then
+		if [[ -z "$gazebo_parent" ]] \
+			|| ! pgrep -P "$gazebo_parent" gzserver >/dev/null 2>&1; then
 			break
 		fi
 		sleep 0.1
 	done
 
-	tmux kill-session -t "$SESSION"
-	echo "Stopped dual Gazebo session: $SESSION"
+	local grouped
+	while grouped="$(related_sessions | head -n 1)" && [[ -n "$grouped" ]]; do
+		tmux kill-session -t "=$grouped"
+	done
+	echo "Stopped dual Gazebo session group: $SESSION"
 }
 
 write_instance_params() {
@@ -109,12 +154,11 @@ write_instance_params() {
 	mkdir -p "$directory"
 	rm -rf "$directory/etc"
 	cp -R "$BUILD/etc" "$directory/etc"
-	# This lab exposes each vehicle to two independent AAGS stations. MAVLink
-	# forwarding on either PX4 endpoint would reflect GCS heartbeats between
-	# those stations and create a routing loop, so every lab-facing stream is
-	# intentionally non-forwarding.
+	# This lab exposes each vehicle to two independent AAGS stations through one
+	# selected MAVLink-M instance. The bounded peer table performs fanout without
+	# creating observer MAVLink instances or forwarding loops.
 	sed -i '' \
-		"s#mavlink start -x -u \$udp_gcs_port_local -r 4000000 -f#mavlink start -x -u \$udp_gcs_port_local -o $gcs_port -r 4000000#" \
+		"s#mavlink start -x -u \$udp_gcs_port_local -r 4000000 -f#mavlink start -x -u \$udp_gcs_port_local -o $gcs_port -t 127.0.0.1 -r 4000000#" \
 		"$directory/etc/init.d-posix/px4-rc.mavlink"
 	{
 		echo '#!/bin/sh'
@@ -134,6 +178,8 @@ write_instance_params() {
 		echo 'param set MAV_M_CTL_CMP 190'
 		echo 'param set MAV_M_LNK_ID 0'
 		echo 'param set MAV_M_CTL_LNK 0'
+		echo 'param set MAV_M_PEERS 4'
+		echo 'param set MAV_M_P_TMO 30'
 		echo 'param set MAV_M_MAX_AGE 300'
 		echo 'param set MAV_M_RC_CH 0'
 		# This test-only runner is movement-ready after explicit owner
@@ -155,7 +201,9 @@ configure_live_vehicle() {
 
 	# Unique harmless unknown commands delimit only this configuration run.
 	# PXH has no echo command, and its invalid-command response is synchronous.
-	tmux send-keys -t "$SESSION:$pane" "$begin_marker" Enter
+	local target
+	target="$(session_target)" || die "tmux session group $SESSION is not running"
+	tmux send-keys -t "=$target:$pane" "$begin_marker" Enter
 	for assignment in \
 		"MAV_M_SRC_SYS $owner_system" \
 		"MAV_M_SRC_CMP 190" \
@@ -163,19 +211,23 @@ configure_live_vehicle() {
 		"MAV_M_CTL_CMP 190" \
 		"MAV_M_INST 0" \
 		"MAV_M_CTL_INST 0" \
+		"MAV_M_PEERS 4" \
+		"MAV_M_P_TMO 30" \
 		"MAV_M_ACTION 2"; do
-		tmux send-keys -t "$SESSION:$pane" "param set $assignment" Enter
+		tmux send-keys -t "=$target:$pane" "param set $assignment" Enter
 	done
-	tmux send-keys -t "$SESSION:$pane" 'param save' Enter
-	tmux send-keys -t "$SESSION:$pane" 'param show MAV_SYS_ID' Enter
-	tmux send-keys -t "$SESSION:$pane" 'param show MAV_M_SRC_SYS' Enter
-	tmux send-keys -t "$SESSION:$pane" 'param show MAV_M_CTL_SYS' Enter
-	tmux send-keys -t "$SESSION:$pane" 'param show MAV_M_ACTION' Enter
-	tmux send-keys -t "$SESSION:$pane" "$done_marker" Enter
+	tmux send-keys -t "=$target:$pane" 'param save' Enter
+	tmux send-keys -t "=$target:$pane" 'param show MAV_SYS_ID' Enter
+	tmux send-keys -t "=$target:$pane" 'param show MAV_M_SRC_SYS' Enter
+	tmux send-keys -t "=$target:$pane" 'param show MAV_M_CTL_SYS' Enter
+	tmux send-keys -t "=$target:$pane" 'param show MAV_M_PEERS' Enter
+	tmux send-keys -t "=$target:$pane" 'param show MAV_M_P_TMO' Enter
+	tmux send-keys -t "=$target:$pane" 'param show MAV_M_ACTION' Enter
+	tmux send-keys -t "=$target:$pane" "$done_marker" Enter
 
 	local output ready=0
 	for _ in {1..50}; do
-		output="$(tmux capture-pane -p -t "$SESSION:$pane" -S -260)"
+		output="$(tmux capture-pane -p -t "=$target:$pane" -S -260)"
 		if printf '%s\n' "$output" \
 			| grep -Fx "Invalid command: $done_marker" >/dev/null; then
 			ready=1
@@ -204,6 +256,9 @@ configure_live_vehicle() {
 	printf '%s\n' "$segment" \
 		| grep -E 'MAV_M_ACTION .*: 2$' >/dev/null \
 		|| die "$pane did not apply MAV_M_ACTION 2"
+	printf '%s\n' "$segment" \
+		| grep -E 'MAV_M_PEERS .*: 4$' >/dev/null \
+		|| die "$pane did not enable four direct AAGS peers"
 }
 
 configure() {
@@ -327,8 +382,22 @@ start() {
 
 	tmux new-window -t "$SESSION" -n sys44 \
 		"cd \"$RUN_ROOT/rootfs/43\" && exec arch -x86_64 env $common_env PX4_SIM_MODEL=gazebo-classic_plane_lidar PATH=\"$RUN_ROOT/rootfs/43:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin\" \"$PX4\" -i 43 \"$RUN_ROOT/rootfs/43/etc\""
+	if ! wait_for_px4_startup sys44; then
+		tmux capture-pane -p -t "$SESSION:sys44" -S -160 >&2 || true
+		stop
+		die "PX4 SYS44 did not finish its startup script"
+	fi
+
+	# Start the second PX4 only after the first has completed its startup
+	# commands. Concurrent PX4 1.14 command clients can occasionally leave a
+	# mavlink stream request waiting forever on macOS/Rosetta.
 	tmux new-window -t "$SESSION" -n sys45 \
 		"cd \"$RUN_ROOT/rootfs/44\" && exec arch -x86_64 env $common_env PX4_SIM_MODEL=gazebo-classic_plane_lidar PATH=\"$RUN_ROOT/rootfs/44:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin\" \"$PX4\" -i 44 \"$RUN_ROOT/rootfs/44/etc\""
+	if ! wait_for_px4_startup sys45; then
+		tmux capture-pane -p -t "$SESSION:sys45" -S -160 >&2 || true
+		stop
+		die "PX4 SYS45 did not finish its startup script"
+	fi
 
 	local px4_ready=0
 	for _ in {1..80}; do
@@ -347,13 +416,6 @@ start() {
 		die "PX4 owner MAVLink ports did not become ready"
 	}
 
-	# Independent, non-task telemetry streams let both AAGS stations display
-	# both vehicles while each station keeps one local cue/owner link.
-	tmux send-keys -t "$SESSION:sys44" \
-		'mavlink start -x -u 18615 -o 14552 -t 127.0.0.1 -r 4000000' Enter
-	tmux send-keys -t "$SESSION:sys45" \
-		'mavlink start -x -u 18616 -o 14553 -t 127.0.0.1 -r 4000000' Enter
-
 	# Reassert after full startup and persist the intended owner mapping. This
 	# repairs a reused rootfs whose parameters were changed by an earlier
 	# cross-owner test instead of trusting stale parameters.bson contents.
@@ -361,8 +423,9 @@ start() {
 
 	echo "Started dual Gazebo lab in tmux session: $SESSION"
 	echo "Attach: tmux attach -t $SESSION"
-	echo "SYSID 44 -> local cue/owner UDP 18613, observer UDP 18615"
-	echo "SYSID 45 -> local cue/owner UDP 18614, observer UDP 18616"
+	echo "SYSID 44 -> Fleet UDP 18613"
+	echo "SYSID 45 -> Fleet UDP 18614"
+	echo "Both AAGS stations register on each vehicle's one bounded peer table"
 }
 
 action="${1:-start}"
@@ -371,7 +434,7 @@ case "$action" in
 	stop) stop ;;
 	status) status ;;
 	configure) configure ;;
-	attach) exec tmux attach -t "$SESSION" ;;
+	attach) target="$(session_target)" || die "tmux session group $SESSION is not running"; exec tmux attach -t "=$target" ;;
 	-h|--help|help) usage ;;
 	*) usage >&2; die "unknown action: $action" ;;
 esac
