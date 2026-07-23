@@ -3149,7 +3149,7 @@ void MavlinkMHandler::send_ack(const Assignment &assignment, uint8_t result, con
 		return;
 	}
 
-	_mavlink->set_proto_version(2);
+	_mavlink->set_protocol_version(2);
 
 	mavlink_mavlink_m_ack_t ack{};
 	ack.time_usec = utc_now_usec();
@@ -3170,7 +3170,7 @@ void MavlinkMHandler::send_control_command_ack(const mavlink_message_t &request,
 
 	mavlink_command_long_t command{};
 	mavlink_msg_command_long_decode(&request, &command);
-	_mavlink->set_proto_version(2);
+	_mavlink->set_protocol_version(2);
 
 	mavlink_command_ack_t ack{};
 	ack.command = command.command;
@@ -3222,7 +3222,7 @@ void MavlinkMHandler::send_control_status()
 		mavlink_msg_named_value_float_send_struct(_mavlink->get_channel(), &item);
 	};
 
-	_mavlink->set_proto_version(2);
+	_mavlink->set_protocol_version(2);
 	// These receiver-authored fields let every fleet observer render the same
 	// cue state without mistaking visibility for decision authority. Zero means
 	// network decisions are disabled; minus one is the documented any-system
@@ -3416,7 +3416,7 @@ void MavlinkMHandler::update()
 	if (route_selected) {
 		// Signed MAVLink-M traffic cannot be represented in MAVLink 1. Select
 		// MAVLink 2 even while a physical route is waiting for UTC or its key.
-		_mavlink->set_proto_version(2);
+		_mavlink->set_protocol_version(2);
 	}
 
 	if (route_selected && signing_required() && !signing_active()
