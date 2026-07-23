@@ -37,6 +37,92 @@ file(RELATIVE_PATH MAVLINK_GIT_DIR_RELATIVE ${CMAKE_SOURCE_DIR} ${MAVLINK_GIT_DI
 
 px4_add_git_submodule(TARGET git_mavlink_v2 PATH "${MAVLINK_GIT_DIR}")
 
+set(MAVLINK_PRIMARY_GENERATOR_DIR "${MAVLINK_GIT_DIR}/pymavlink")
+set(MAVLINK_PRIMARY_DEFINITION_DIR "${MAVLINK_GIT_DIR}/message_definitions/v1.0")
+set(MAVLINK_PRIMARY_PYTHON_EXECUTABLE "${PYTHON_EXECUTABLE}")
+set(MAVLINK_PRIMARY_PYTHONPATH "${MAVLINK_GIT_DIR}")
+set(MAVLINK_PRIMARY_DEPENDENCIES git_mavlink_v2)
+set(MAVLINK_PRIMARY_GENERATOR_OPTIONS)
+
+if(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	if(NOT "${CONFIG_MAVLINK_DIALECT}" STREQUAL "mavlink_m")
+		message(FATAL_ERROR "CONFIG_MAVLINK_M_PRIVATE_PROFILE requires CONFIG_MAVLINK_DIALECT=mavlink_m")
+	endif()
+
+	if("${PX4_PLATFORM}" STREQUAL "nuttx" AND NOT CONFIG_MODULES_UXRCE_DDS_CLIENT)
+		message(STATUS
+			"AAGS CAM MAVLink-M firmware: ROS 2 uXRCE-DDS client is disabled to preserve the FMUv6 flash budget"
+		)
+	endif()
+
+	set(MAVLINK_M_GENERATOR_DIR "${CMAKE_CURRENT_LIST_DIR}/mavlink_m_generator")
+	set(MAVLINK_M_DEFINITION_DIR "${CMAKE_CURRENT_LIST_DIR}/mavlink_m/message_definitions/v1.0")
+	# A clean clone needs the normal PX4 initializer. During preparation of the
+	# surrounding superproject commit, the checked-out gitlink already exists
+	# but is not yet visible from HEAD, so avoid the interactive mismatch prompt.
+	if(EXISTS "${MAVLINK_M_GENERATOR_DIR}/tools/mavgen.py")
+		add_custom_target(git_mavlink_m_generator)
+	else()
+		px4_add_git_submodule(TARGET git_mavlink_m_generator PATH "${MAVLINK_M_GENERATOR_DIR}")
+	endif()
+
+	execute_process(
+		COMMAND git -C "${MAVLINK_M_GENERATOR_DIR}" rev-parse HEAD
+		OUTPUT_VARIABLE MAVLINK_M_GENERATOR_COMMIT
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+		ERROR_VARIABLE MAVLINK_M_GENERATOR_GIT_ERROR
+		RESULT_VARIABLE MAVLINK_M_GENERATOR_GIT_RESULT
+	)
+	if(NOT "${MAVLINK_M_GENERATOR_GIT_RESULT}" STREQUAL "0")
+		message(FATAL_ERROR
+			"Unable to identify the MAVLink-M generator commit: ${MAVLINK_M_GENERATOR_GIT_ERROR}"
+		)
+	endif()
+	if(NOT "${MAVLINK_M_GENERATOR_COMMIT}" STREQUAL "2a500b8acfb507255d02ed8257b6eb132e5b86d7")
+		message(FATAL_ERROR "MAVLink-M generator commit mismatch: ${MAVLINK_M_GENERATOR_COMMIT}")
+	endif()
+
+	find_program(MAVLINK_M_PYTHON_EXECUTABLE NAMES python3.9)
+	if(NOT MAVLINK_M_PYTHON_EXECUTABLE)
+		message(FATAL_ERROR "MAVLink-M generation requires Python 3.9")
+	endif()
+	execute_process(
+		COMMAND "${MAVLINK_M_PYTHON_EXECUTABLE}" -c
+			"import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+		OUTPUT_VARIABLE MAVLINK_M_PYTHON_VERSION
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+		ERROR_VARIABLE MAVLINK_M_PYTHON_VERSION_ERROR
+		RESULT_VARIABLE MAVLINK_M_PYTHON_VERSION_RESULT
+	)
+	if(NOT "${MAVLINK_M_PYTHON_VERSION_RESULT}" STREQUAL "0")
+		message(FATAL_ERROR
+			"Unable to query the MAVLink-M Python version: ${MAVLINK_M_PYTHON_VERSION_ERROR}"
+		)
+	endif()
+	if(NOT "${MAVLINK_M_PYTHON_VERSION}" STREQUAL "3.9")
+		message(FATAL_ERROR "MAVLink-M generation requires Python 3.9, found ${MAVLINK_M_PYTHON_VERSION}")
+	endif()
+
+	file(STRINGS "${MAVLINK_M_GENERATOR_DIR}/__init__.py" MAVLINK_M_GENERATOR_VERSION_LINE
+		REGEX "^__version__ = '2\\.4\\.49'$"
+	)
+	if(NOT MAVLINK_M_GENERATOR_VERSION_LINE)
+		message(FATAL_ERROR "MAVLink-M generation requires pymavlink 2.4.49")
+	endif()
+
+	file(SHA256 "${MAVLINK_M_DEFINITION_DIR}/mavlink_m.xml" MAVLINK_M_CORE_SHA256)
+	if(NOT "${MAVLINK_M_CORE_SHA256}" STREQUAL "02a88f79b9b4e58b271d9b0012a06087ac4ec975c75a8b1d7ba704c43bb55a8f")
+		message(FATAL_ERROR "Dronecode MAVLink-M canonical XML hash mismatch: ${MAVLINK_M_CORE_SHA256}")
+	endif()
+
+	set(MAVLINK_PRIMARY_GENERATOR_DIR "${MAVLINK_M_GENERATOR_DIR}")
+	set(MAVLINK_PRIMARY_DEFINITION_DIR "${MAVLINK_M_DEFINITION_DIR}")
+	set(MAVLINK_PRIMARY_PYTHON_EXECUTABLE "${MAVLINK_M_PYTHON_EXECUTABLE}")
+	set(MAVLINK_PRIMARY_PYTHONPATH "${CMAKE_CURRENT_LIST_DIR}/mavlink_m_pythonpath")
+	list(APPEND MAVLINK_PRIMARY_DEPENDENCIES git_mavlink_m_generator)
+	list(APPEND MAVLINK_PRIMARY_GENERATOR_OPTIONS --no-validate)
+endif()
+
 # always generate uAvionix dialect
 set(MAVLINK_DIALECT_UAVIONIX "uAvionix")
 add_custom_command(
@@ -60,21 +146,33 @@ set_source_files_properties(${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/$
 add_custom_command(
 	OUTPUT ${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}/${CONFIG_MAVLINK_DIALECT}.h
 	COMMAND
-		${PYTHON_EXECUTABLE} ${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
-			--lang C --wire-protocol 2.0
-			--output ${MAVLINK_LIBRARY_DIR}
-			${MAVLINK_GIT_DIR}/message_definitions/v1.0/${CONFIG_MAVLINK_DIALECT}.xml > ${CMAKE_CURRENT_BINARY_DIR}/mavgen_${CONFIG_MAVLINK_DIALECT}.log
+		${CMAKE_COMMAND} -E env
+			PYTHONHASHSEED=0
+			PYTHONPATH=${MAVLINK_PRIMARY_PYTHONPATH}
+			${MAVLINK_PRIMARY_PYTHON_EXECUTABLE} ${MAVLINK_PRIMARY_GENERATOR_DIR}/tools/mavgen.py
+				--lang C --wire-protocol 2.0
+				${MAVLINK_PRIMARY_GENERATOR_OPTIONS}
+				--output ${MAVLINK_LIBRARY_DIR}
+				${MAVLINK_PRIMARY_DEFINITION_DIR}/${CONFIG_MAVLINK_DIALECT}.xml > ${CMAKE_CURRENT_BINARY_DIR}/mavgen_${CONFIG_MAVLINK_DIALECT}.log
+	COMMAND
+		${MAVLINK_PRIMARY_PYTHON_EXECUTABLE}
+			${CMAKE_CURRENT_LIST_DIR}/mavlink_m/normalize_generated_headers.py
+			${MAVLINK_LIBRARY_DIR}
 	DEPENDS
-		git_mavlink_v2
-		${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
-		${MAVLINK_GIT_DIR}/message_definitions/v1.0/${CONFIG_MAVLINK_DIALECT}.xml
+		${MAVLINK_PRIMARY_DEPENDENCIES}
+		${MAVLINK_PRIMARY_GENERATOR_DIR}/tools/mavgen.py
+		${MAVLINK_PRIMARY_DEFINITION_DIR}/${CONFIG_MAVLINK_DIALECT}.xml
+		${MAVLINK_PRIMARY_DEFINITION_DIR}/common.xml
+		${MAVLINK_PRIMARY_DEFINITION_DIR}/standard.xml
+		${MAVLINK_PRIMARY_DEFINITION_DIR}/minimal.xml
+		${CMAKE_CURRENT_LIST_DIR}/mavlink_m/normalize_generated_headers.py
 		${BOARD_DEFCONFIG}
 
 		# generate after uAvionix
 		mavlink_c_generate_uavionix
 		${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/${MAVLINK_DIALECT_UAVIONIX}.h
 
-	COMMENT "Generating Mavlink ${CONFIG_MAVLINK_DIALECT}: ${MAVLINK_GIT_DIR_RELATIVE}/message_definitions/v1.0/${CONFIG_MAVLINK_DIALECT}.xml"
+	COMMENT "Generating Mavlink ${CONFIG_MAVLINK_DIALECT}: ${MAVLINK_PRIMARY_DEFINITION_DIR}/${CONFIG_MAVLINK_DIALECT}.xml"
 )
 add_custom_target(mavlink_c_generate DEPENDS ${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}/${CONFIG_MAVLINK_DIALECT}.h)
 set_source_files_properties(${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}/${CONFIG_MAVLINK_DIALECT}.h PROPERTIES GENERATED true)
@@ -96,6 +194,11 @@ target_include_directories(mavlink_c
 		${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}
 )
 
+set(MAVLINK_M_PRIVATE_SOURCES)
+if(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	list(APPEND MAVLINK_M_PRIVATE_SOURCES MavlinkMHandler.cpp)
+endif()
+
 px4_add_module(
 	MODULE modules__mavlink
 	MAIN mavlink
@@ -114,6 +217,7 @@ px4_add_module(
 		mavlink_parameters.cpp
 		mavlink_rate_limiter.cpp
 		mavlink_receiver.cpp
+		${MAVLINK_M_PRIVATE_SOURCES}
 		mavlink_shell.cpp
 		mavlink_simple_analyzer.cpp
 		mavlink_stream.cpp
@@ -133,6 +237,7 @@ px4_add_module(
 		drivers_gyroscope
 		drivers_magnetometer
 		conversion
+		crc
 		sensor_calibration
 		geo
 		mavlink_c
@@ -145,6 +250,26 @@ px4_add_module(
 
 if(PX4_TESTING)
 	add_subdirectory(mavlink_tests)
+
+	if(CONFIG_MAVLINK_M_PRIVATE_PROFILE AND "${PX4_PLATFORM}" MATCHES "posix")
+		add_executable(mavlink_m_conformance_test
+			mavlink_tests/MavlinkMConformanceTest.c
+		)
+		add_dependencies(mavlink_m_conformance_test mavlink_c_generate)
+		target_include_directories(mavlink_m_conformance_test PRIVATE
+			${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}
+			${CMAKE_CURRENT_SOURCE_DIR}
+		)
+		target_compile_options(mavlink_m_conformance_test PRIVATE
+			-UNDEBUG
+			-Wno-cast-align
+			-Wno-unused-function
+			-Wno-unused-parameter
+		)
+		if(BUILD_TESTING)
+			add_test(NAME mavlink_m_conformance COMMAND mavlink_m_conformance_test --self-test)
+		endif()
+	endif()
 endif()
 
 px4_add_unit_gtest(SRC MavlinkStatustextHandlerTest.cpp

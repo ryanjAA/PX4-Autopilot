@@ -111,6 +111,7 @@ uint16 VEHICLE_CMD_EXTERNAL_WIND_ESTIMATE = 43004
 uint32 VEHICLE_CMD_PX4_INTERNAL_START    = 65537        # start of PX4 internal only vehicle commands (> UINT16_MAX)
 uint32 VEHICLE_CMD_SET_GPS_GLOBAL_ORIGIN = 100000       # Sets the GPS coordinates of the vehicle local origin (0,0,0) position. |Empty|Empty|Empty|Empty|Latitude|Longitude|Altitude|
 uint32 VEHICLE_CMD_SET_NAV_STATE = 100001               # Change mode by specifying nav_state directly. |nav_state|Empty|Empty|Empty|Empty|Empty|Empty|
+uint32 VEHICLE_CMD_PX4_MAVLINK_M_FLY_THROUGH = 100002   # Internal-only exact waypoint transit followed by target-centered recovery loiter. |Token low 16 bits|Token high 16 bits|Recovery altitude AMSL|Minimum terrain clearance, -1 surveyed override|Latitude|Longitude|Cue altitude AMSL|
 
 uint8 VEHICLE_MOUNT_MODE_RETRACT = 0			# Load and keep safe position (Roll,Pitch,Yaw) from permanent memory and stop stabilization |
 uint8 VEHICLE_MOUNT_MODE_NEUTRAL = 1			# Load and keep neutral position (Roll,Pitch,Yaw) from permanent memory. |
