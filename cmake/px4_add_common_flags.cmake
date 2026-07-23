@@ -171,6 +171,15 @@ function(px4_add_common_flags)
 		add_compile_options($<$<COMPILE_LANGUAGE:CXX>:${flag}>)
 	endforeach()
 
+	# Current AppleClang diagnoses the legacy variable length arrays retained by
+	# this PX4 release as C++ extensions. Keep the normal warning policy while
+	# allowing the maintained release baseline to build on current macOS.
+	if(APPLE AND "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+		add_compile_options(
+			$<$<COMPILE_LANGUAGE:CXX>:-Wno-vla-cxx-extension>
+		)
+	endif()
+
 
 	include_directories(
 		${PX4_BINARY_DIR}

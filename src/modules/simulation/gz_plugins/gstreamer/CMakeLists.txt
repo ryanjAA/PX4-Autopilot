@@ -35,8 +35,8 @@ project(GstCameraSystem)
 
 # Find required packages
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GSTREAMER gstreamer-1.0)
-pkg_check_modules(GSTREAMER_APP gstreamer-app-1.0)
+pkg_check_modules(GSTREAMER IMPORTED_TARGET gstreamer-1.0)
+pkg_check_modules(GSTREAMER_APP IMPORTED_TARGET gstreamer-app-1.0)
 
 if (NOT GSTREAMER_FOUND OR NOT GSTREAMER_APP_FOUND)
     message(WARNING "GStreamer and Gstreamer App are required to build this plugin.")
@@ -51,8 +51,8 @@ else()
         PUBLIC gz-plugin${gz-plugin_VERSION_MAJOR}::gz-plugin${gz-plugin_VERSION_MAJOR}
         PUBLIC gz-sim${gz-sim_VERSION_MAJOR}::gz-sim${gz-sim_VERSION_MAJOR}
         PUBLIC gz-transport${gz-transport_VERSION_MAJOR}::gz-transport${gz-transport_VERSION_MAJOR}
-        PUBLIC ${GSTREAMER_LIBRARIES}
-        PUBLIC ${GSTREAMER_APP_LIBRARIES}
+        PUBLIC PkgConfig::GSTREAMER
+        PUBLIC PkgConfig::GSTREAMER_APP
     )
 
     target_include_directories(${PROJECT_NAME}
