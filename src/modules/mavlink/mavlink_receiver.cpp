@@ -131,12 +131,6 @@ MavlinkReceiver::acknowledge(uint8_t sysid, uint8_t compid, uint16_t command, ui
 void
 MavlinkReceiver::handle_message(mavlink_message_t *msg)
 {
-#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
-	if (_mavlink_m_handler.handle_message(*msg)) {
-		return;
-	}
-#endif
-
 	switch (msg->msgid) {
 	case MAVLINK_MSG_ID_COMMAND_LONG:
 		handle_message_command_long(msg);
@@ -3243,6 +3237,12 @@ MavlinkReceiver::run()
 	ssize_t nread = 0;
 	hrt_abstime last_send_update = 0;
 
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+	// Apply Disabled, Direct, or Gateway state before the first UDP datagram can
+	// reach the legacy first-packet partner latch.
+	_mavlink_m_handler.update();
+#endif
+
 	while (!_mavlink->should_exit()) {
 
 		// check for parameter updates
@@ -3253,11 +3253,16 @@ MavlinkReceiver::run()
 
 			// update parameters from storage
 			updateParams();
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+			_mavlink_m_handler.update();
+#endif
 		}
 
 		int ret = poll(&fds[0], 1, timeout);
 
 		if (ret > 0) {
+			nread = 0;
+
 			if (_mavlink->get_protocol() == Protocol::SERIAL) {
 				/* non-blocking read. read may return negative values */
 				nread = ::read(fds[0].fd, buf, sizeof(buf));
@@ -3271,14 +3276,20 @@ MavlinkReceiver::run()
 
 			else if (_mavlink->get_protocol() == Protocol::UDP) {
 				if (fds[0].revents & POLLIN) {
+					addrlen = sizeof(srcaddr);
 					nread = recvfrom(_mavlink->get_socket_fd(), buf, sizeof(buf), 0, (struct sockaddr *)&srcaddr, &addrlen);
 				}
 
 				struct sockaddr_in &srcaddr_last = _mavlink->get_client_source_address();
+				bool protected_udp_route = false;
+
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+				protected_udp_route = _mavlink->mavlink_m_udp_provenance_managed();
+#endif
 
 				int localhost = (127 << 24) + 1;
 
-				if (!_mavlink->get_client_source_initialized()) {
+				if (!_mavlink->get_client_source_initialized() && !protected_udp_route) {
 
 					// set the address either if localhost or if 3 seconds have passed
 					// this ensures that a GCS running on localhost can get a hold of
@@ -3299,12 +3310,110 @@ MavlinkReceiver::run()
 			}
 
 			// only start accepting messages on UDP once we're sure who we talk to
-			if (_mavlink->get_protocol() != Protocol::UDP || _mavlink->get_client_source_initialized()) {
+			bool udp_input_allowed = _mavlink->get_protocol() != Protocol::UDP
+						 || _mavlink->get_client_source_initialized();
+
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+			udp_input_allowed = udp_input_allowed || _mavlink->mavlink_m_udp_provenance_managed();
+#endif
+
+			if (udp_input_allowed) {
 #endif // MAVLINK_UDP
+
+#if defined(MAVLINK_UDP)
+				if (_mavlink->get_protocol() == Protocol::UDP && nread > 0) {
+					// A UDP datagram is one framing and provenance boundary. Preserve
+					// signing, replay, sequence, and statistics state, but discard any
+					// incomplete parser state before consuming this datagram.
+					mavlink_status_t *parser_status = _mavlink->get_status();
+					parser_status->parse_state = MAVLINK_PARSE_STATE_IDLE;
+					parser_status->packet_idx = 0;
+					parser_status->signature_wait = 0;
+					parser_status->msg_received = MAVLINK_FRAMING_INCOMPLETE;
+					_mavlink->get_buffer()->len = 0;
+				}
+#endif
 
 				/* if read failed, this loop won't execute */
 				for (ssize_t i = 0; i < nread; i++) {
 					if (mavlink_parse_char(_mavlink->get_channel(), buf[i], &msg, &_status)) {
+
+#if defined(MAVLINK_UDP) && defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+						// The parser returns a message only after CRC and, when configured,
+						// MAVLink 2 signature validation. Admit a network endpoint only from
+						// that validated frame, never from the raw UDP datagram source.
+						if (_mavlink->get_protocol() == Protocol::UDP
+						    && _mavlink_m_handler.accepts_udp_peer_heartbeat(msg)) {
+							(void)_mavlink->register_mavlink_m_udp_peer(
+								srcaddr, msg.sysid, msg.compid);
+						}
+#endif
+
+#if defined(CONFIG_MAVLINK_M_PRIVATE_PROFILE)
+						bool udp_endpoint_authorized = true;
+						bool udp_provenance_managed = false;
+#if defined(MAVLINK_UDP)
+						if (_mavlink->get_protocol() == Protocol::UDP) {
+							udp_provenance_managed = _mavlink->mavlink_m_udp_provenance_managed();
+							udp_endpoint_authorized = _mavlink->mavlink_m_udp_ingress_authorized(
+								srcaddr, msg.sysid, msg.compid);
+						}
+#endif
+						// Direct and Gateway modes make the exact datagram source a
+						// route-wide admission boundary. An unregistered sender may not
+						// bypass MAVLink-M checks through ordinary command, mission,
+						// parameter, FTP, timesync, or forwarding handlers. A valid direct
+						// GCS heartbeat was registered immediately above, so it passes this
+						// check and can establish a new peer. Serial and Disabled mode keep
+						// their existing behavior.
+						if (udp_provenance_managed && !udp_endpoint_authorized) {
+							update_rx_stats(msg);
+
+							if (_message_statistics_enabled) {
+								update_message_statistics(msg);
+							}
+
+							continue;
+						}
+
+						// A selected signed route is a security boundary before its key
+						// or UTC clock is available. No decoded frame may bypass the lock.
+						if (_mavlink_m_handler.ingress_locked()) {
+							update_rx_stats(msg);
+
+							if (_message_statistics_enabled) {
+								update_message_statistics(msg);
+							}
+
+							continue;
+						}
+
+						// Protected messages are handled before every generic receiver and
+						// forwarding path. A consumed denial cannot fall through later.
+						if (_mavlink_m_handler.handle_message(msg, udp_endpoint_authorized)) {
+							update_rx_stats(msg);
+
+							if (_message_statistics_enabled) {
+								update_message_statistics(msg);
+							}
+
+							continue;
+						}
+
+						// Learned Fleet peers receive telemetry and receiver-confirmed
+						// task state. Only the configured owner identity may reach ordinary
+						// commands, missions, parameters, FTP, TIMESYNC, or forwarding.
+						if (!_mavlink_m_handler.generic_ingress_allowed(
+							    msg, udp_endpoint_authorized)) {
+							update_rx_stats(msg);
+
+							if (_message_statistics_enabled) {
+								update_message_statistics(msg);
+							}
+
+							continue;
+						}
+#endif
 
 						/* check if we received version 2 and request a switch. */
 						if (!(_mavlink->get_status()->flags & MAVLINK_STATUS_FLAG_IN_MAVLINK1)) {
@@ -3351,6 +3460,17 @@ MavlinkReceiver::run()
 						}
 					}
 				}
+
+#if defined(MAVLINK_UDP)
+				if (_mavlink->get_protocol() == Protocol::UDP && nread > 0) {
+					mavlink_status_t *parser_status = _mavlink->get_status();
+					parser_status->parse_state = MAVLINK_PARSE_STATE_IDLE;
+					parser_status->packet_idx = 0;
+					parser_status->signature_wait = 0;
+					parser_status->msg_received = MAVLINK_FRAMING_INCOMPLETE;
+					_mavlink->get_buffer()->len = 0;
+				}
+#endif
 
 				/* count received bytes (nread will be -1 on read error) */
 				if (nread > 0) {

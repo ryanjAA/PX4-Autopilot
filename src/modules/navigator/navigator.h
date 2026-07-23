@@ -182,7 +182,7 @@ public:
 	float get_fw_max_sink_rate() const { return _param_fw_t_sink_max.get(); }
 	float get_fw_max_climb_rate() const { return _param_fw_t_clmb_max.get(); }
 	float get_fw_max_airspeed() const { return _param_fw_airspd_max.get(); }
-	bool mavlink_m_fly_through_allowed(double lat, double lon, float alt);
+	bool mavlink_m_fly_through_allowed(double lat, double lon, float alt, float minimum_clearance_m);
 	void publish_mavlink_m_fly_through_ack(uint32_t token, uint8_t result, uint8_t result_param1 = 0);
 
 	/**

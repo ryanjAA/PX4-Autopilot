@@ -74,6 +74,13 @@ constexpr hrt_abstime MavlinkMStateMaxAge{2_s};
 constexpr float MavlinkMApproachGradientMargin{0.8f};
 constexpr float MavlinkMMaximumApproachDistanceM{100'000.f};
 
+bool mavlink_m_clearance_parameter_valid(float minimum_clearance_m)
+{
+	return PX4_ISFINITE(minimum_clearance_m)
+	       && ((minimum_clearance_m >= 0.f && minimum_clearance_m <= 1'000.f)
+		   || fabsf(minimum_clearance_m + 1.f) <= FLT_EPSILON);
+}
+
 bool mavlink_m_fixed_wing_ground_speed_bounds(const wind_s &wind, hrt_abstime now,
 		float maximum_airspeed, float *true_airspeed_bound, float *ground_speed_bound)
 {
@@ -152,7 +159,7 @@ bool mavlink_m_fixed_wing_approach_distance(float start_alt, float target_alt,
 bool exact_token_half(float value, uint16_t *half)
 {
 	if (half == nullptr || !PX4_ISFINITE(value) || value < 0.f || value > UINT16_MAX
-	    || floorf(value) != value) {
+	    || value - floorf(value) > 0.f) {
 		return false;
 	}
 
@@ -364,7 +371,11 @@ void Navigator::run()
 							   && now - cmd.timestamp <= MavlinkMInternalCommandMaxAge;
 				const bool valid_request = !cmd.from_external && addressed_to_vehicle && token_valid
 							   && command_fresh
-							   && mavlink_m_fly_through_allowed(cmd.param5, cmd.param6, cmd.param7);
+							   && PX4_ISFINITE(cmd.param3)
+							   && mavlink_m_fly_through_allowed(
+								   cmd.param5, cmd.param6, cmd.param7, cmd.param4)
+							   && mavlink_m_fly_through_allowed(
+								   cmd.param5, cmd.param6, cmd.param3, cmd.param4);
 
 				if (valid_request) {
 					position_setpoint_triplet_s *rep = get_reposition_triplet();
@@ -373,6 +384,7 @@ void Navigator::run()
 					float true_airspeed_bound = NAN;
 					float ground_speed_bound = NAN;
 					float required_slope_distance_m = 0.f;
+					float required_recovery_distance_m = 0.f;
 					const bool speed_bounds_valid = !fixed_wing
 									|| mavlink_m_fixed_wing_ground_speed_bounds(
 										_wind_sub.get(), now, get_fw_max_airspeed(),
@@ -385,11 +397,23 @@ void Navigator::run()
 									     get_fw_max_sink_rate(), get_fw_max_climb_rate(),
 									     true_airspeed_bound, ground_speed_bound,
 									     &required_slope_distance_m));
+					const bool recovery_geometry_valid = !fixed_wing
+								     || (speed_bounds_valid
+									 && mavlink_m_fixed_wing_approach_distance(
+									     cmd.param7, cmd.param3,
+									     get_fw_pitch_limit_min(), get_fw_pitch_limit_max(),
+									     get_fw_max_sink_rate(), get_fw_max_climb_rate(),
+									     true_airspeed_bound, ground_speed_bound,
+									     &required_recovery_distance_m));
 					const bool approach_required = fixed_wing && approach_geometry_valid
 								       && required_slope_distance_m > 0.f;
+					const bool recovery_required = fixed_wing && recovery_geometry_valid
+								       && required_recovery_distance_m > 0.f;
 					double approach_lat = static_cast<double>(NAN);
 					double approach_lon = static_cast<double>(NAN);
-					bool approach_allowed = approach_geometry_valid;
+					double recovery_lat = cmd.param5;
+					double recovery_lon = cmd.param6;
+					bool approach_allowed = approach_geometry_valid && recovery_geometry_valid;
 
 					if (approach_required) {
 						const float direct_distance_m = get_distance_to_next_waypoint(
@@ -417,7 +441,25 @@ void Navigator::run()
 						approach_allowed = approach_allowed && PX4_ISFINITE(approach_lat)
 								   && PX4_ISFINITE(approach_lon)
 								   && mavlink_m_fly_through_allowed(approach_lat, approach_lon,
-										   get_global_position()->alt);
+										   get_global_position()->alt, cmd.param4);
+					}
+
+					if (recovery_required && approach_allowed) {
+						const double inbound_lat = approach_required
+									   ? approach_lat : get_global_position()->lat;
+						const double inbound_lon = approach_required
+									   ? approach_lon : get_global_position()->lon;
+						const float transition_margin_m = math::max(
+								get_acceptance_radius(), MavlinkMHitRadiusM);
+						const float recovery_distance_from_target_m =
+							required_recovery_distance_m + transition_margin_m;
+						create_waypoint_from_line_and_dist(cmd.param5, cmd.param6,
+										   inbound_lat, inbound_lon,
+										   -recovery_distance_from_target_m,
+										   &recovery_lat, &recovery_lon);
+						approach_allowed = PX4_ISFINITE(recovery_lat) && PX4_ISFINITE(recovery_lon)
+								   && mavlink_m_fly_through_allowed(
+									   recovery_lat, recovery_lon, cmd.param3, cmd.param4);
 					}
 
 					if (!approach_allowed) {
@@ -467,7 +509,15 @@ void Navigator::run()
 					rep->next.mavlink_m_exact_altitude = approach_required;
 					rep->next.timestamp = now;
 
-					_loiter.prepare_fly_through(token, cmd.timestamp, cmd.param5, cmd.param6, cmd.param7);
+					_loiter.prepare_fly_through(token, cmd.timestamp,
+								    cmd.param5, cmd.param6, cmd.param7,
+								    cmd.param3, cmd.param4,
+								    recovery_lat, recovery_lon, recovery_required);
+
+					if (cmd.param4 < 0.f) {
+						PX4_WARN("MAVLink-M exact Intercept using externally surveyed MAV_M_INT_CLR=-1 corridor");
+					}
+
 					publish_mavlink_m_fly_through_ack(token, vehicle_command_ack_s::VEHICLE_CMD_RESULT_IN_PROGRESS);
 
 				} else {
@@ -1748,11 +1798,12 @@ bool Navigator::geofence_allows_position(const vehicle_global_position_s &pos)
 	return true;
 }
 
-bool Navigator::mavlink_m_fly_through_allowed(double lat, double lon, float alt)
+bool Navigator::mavlink_m_fly_through_allowed(double lat, double lon, float alt, float minimum_clearance_m)
 {
 	const hrt_abstime now = hrt_absolute_time();
 	const bool target_valid = PX4_ISFINITE(lat) && PX4_ISFINITE(lon) && PX4_ISFINITE(alt)
-				  && lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0;
+				  && lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0
+				  && mavlink_m_clearance_parameter_valid(minimum_clearance_m);
 	const bool vehicle_state_fresh = _vstatus.timestamp != 0 && now >= _vstatus.timestamp
 					 && now - _vstatus.timestamp <= MavlinkMStateMaxAge;
 	const bool land_state_fresh = _land_detected.timestamp != 0 && now >= _land_detected.timestamp
@@ -1771,6 +1822,28 @@ bool Navigator::mavlink_m_fly_through_allowed(double lat, double lon, float alt)
 
 	if (!target_valid || !safe_flight_state) {
 		return false;
+	}
+
+	if (minimum_clearance_m >= 0.f) {
+		const bool local_position_fresh = _local_pos.timestamp != 0
+						  && now >= _local_pos.timestamp
+						  && now - _local_pos.timestamp <= MavlinkMStateMaxAge;
+		const bool terrain_and_hagl_valid = local_position_fresh
+						    && _global_pos.terrain_alt_valid
+						    && PX4_ISFINITE(_global_pos.terrain_alt)
+						    && _local_pos.dist_bottom_valid
+						    && PX4_ISFINITE(_local_pos.dist_bottom);
+		const float actual_terrain_clearance_m = _global_pos.alt - _global_pos.terrain_alt;
+		const float candidate_terrain_clearance_m = alt - _global_pos.terrain_alt;
+
+		if (!terrain_and_hagl_valid
+		    || !PX4_ISFINITE(actual_terrain_clearance_m)
+		    || !PX4_ISFINITE(candidate_terrain_clearance_m)
+		    || actual_terrain_clearance_m < minimum_clearance_m
+		    || _local_pos.dist_bottom < minimum_clearance_m
+		    || candidate_terrain_clearance_m < minimum_clearance_m) {
+			return false;
+		}
 	}
 
 	const int geofence_action = _geofence.getGeofenceAction();

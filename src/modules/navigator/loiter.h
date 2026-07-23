@@ -55,7 +55,9 @@ public:
 	void on_activation() override;
 	void on_active() override;
 	void prepare_fly_through(uint32_t token, hrt_abstime command_timestamp,
-				 double target_lat, double target_lon, float target_alt);
+				 double target_lat, double target_lon, float target_alt,
+				 float recovery_alt, float minimum_clearance,
+				 double recovery_lat, double recovery_lon, bool recovery_outbound);
 	void cancel_fly_through();
 
 private:
@@ -67,8 +69,9 @@ private:
 	void update_fly_through();
 	bool fly_through_endpoints_allowed();
 	void promote_fly_through_approach();
+	void promote_fly_through_recovery();
 	void reset_fly_through_crossing_sample();
-	void complete_fly_through(bool target_hit, float safe_loiter_altitude = NAN);
+	void complete_fly_through(bool target_hit);
 	void clear_fly_through_state();
 
 	/**
@@ -82,6 +85,11 @@ private:
 	double _fly_through_pending_target_lat{static_cast<double>(NAN)};
 	double _fly_through_pending_target_lon{static_cast<double>(NAN)};
 	float _fly_through_pending_target_alt{NAN};
+	float _fly_through_pending_recovery_alt{NAN};
+	float _fly_through_pending_minimum_clearance{NAN};
+	double _fly_through_pending_recovery_lat{static_cast<double>(NAN)};
+	double _fly_through_pending_recovery_lon{static_cast<double>(NAN)};
+	bool _fly_through_pending_recovery_outbound{false};
 	bool _fly_through_active{false};
 	uint32_t _fly_through_token{0};
 	hrt_abstime _fly_through_started{0};
@@ -90,6 +98,13 @@ private:
 	double _fly_through_target_lat{static_cast<double>(NAN)};
 	double _fly_through_target_lon{static_cast<double>(NAN)};
 	float _fly_through_target_alt{NAN};
+	float _fly_through_recovery_alt{NAN};
+	float _fly_through_minimum_clearance{NAN};
+	double _fly_through_recovery_lat{static_cast<double>(NAN)};
+	double _fly_through_recovery_lon{static_cast<double>(NAN)};
+	bool _fly_through_recovery_outbound{false};
+	bool _fly_through_recovery_active{false};
+	bool _fly_through_target_hit{false};
 	bool _fly_through_approach_active{false};
 	double _fly_through_approach_lat{static_cast<double>(NAN)};
 	double _fly_through_approach_lon{static_cast<double>(NAN)};

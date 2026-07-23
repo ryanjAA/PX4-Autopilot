@@ -38,6 +38,7 @@
 #include <uORB/topics/vehicle_command_ack.h>
 #include <uORB/topics/vehicle_global_position.h>
 #include <uORB/topics/vehicle_land_detected.h>
+#include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_status.h>
 
 class Mavlink;
@@ -61,9 +62,27 @@ public:
 	void configure_receiver_status(mavlink_status_t *status);
 	/// Returns true when this endpoint consumed the frame and the generic
 	/// MAVLink command path must not process it a second time.
-	bool handle_message(const mavlink_message_t &message);
+	bool handle_message(const mavlink_message_t &message, bool udp_endpoint_authorized);
 	void update();
 	void update_parameters();
+
+	/// A fleet peer is learned only from a fully decoded GCS heartbeat on the
+	/// configured MAVLink-M cue instance. The component and signing link must
+	/// match either the cue-source role or the valid ESAD owner-control role.
+	bool accepts_udp_peer_heartbeat(const mavlink_message_t &message) const;
+	/// A selected physical-mode route remains a route-wide deny boundary until
+	/// both transmit signing and receiver signature validation are active.
+	bool ingress_locked() const;
+	/// Once a MAVLink-M route is selected, ordinary PX4 ingress belongs only to
+	/// the configured owner-control identity on its exact route. Learned peers
+	/// remain read-only observers unless an explicit wildcard grants authority.
+	bool generic_ingress_allowed(const mavlink_message_t &message,
+				     bool udp_endpoint_authorized) const;
+	unsigned udp_peer_limit() const { return static_cast<unsigned>(_peer_limit); }
+	hrt_abstime udp_peer_timeout() const
+	{
+		return static_cast<hrt_abstime>(_peer_timeout_s) * 1'000'000ULL;
+	}
 
 private:
 	enum class AssignmentState : uint8_t {
@@ -211,14 +230,21 @@ private:
 	static_assert(CommandExecutionAll == 3 && CommandAll == 7,
 		      "MAVLink-M command and stop-state flags must remain stable");
 
+	bool cue_physical_route_selected() const;
+	bool control_physical_route_selected() const;
+	bool cue_route_selected() const;
+	bool control_route_selected() const;
+	bool signing_active() const;
 	bool enabled() const;
 	bool control_enabled() const;
 	bool signing_required() const;
+	bool signing_link_matches(const mavlink_message_t &message, int32_t expected_link_id) const;
 	bool source_matches(const mavlink_message_t &message) const;
 	bool control_source_matches(const mavlink_message_t &message) const;
 	bool source_recent(uint8_t source_system) const;
-	bool task_message_allowed(const mavlink_message_t &message) const;
-	bool handle_control_command(const mavlink_message_t &message);
+	bool task_message_allowed(const mavlink_message_t &message, bool udp_endpoint_authorized) const;
+	bool esad_control_allowed(const mavlink_message_t &message, bool udp_endpoint_authorized) const;
+	bool handle_control_command(const mavlink_message_t &message, bool udp_endpoint_authorized);
 	void handle_track_identity(const mavlink_message_t &message);
 	void handle_target_cue(const mavlink_message_t &message);
 	void handle_target_handover(const mavlink_message_t &message);
@@ -257,7 +283,8 @@ private:
 				      float param3 = NAN, float param4 = NAN, double param5 = static_cast<double>(NAN),
 				      double param6 = static_cast<double>(NAN),
 				      float param7 = NAN, uint8_t target_component = CommandTargetLocalComponent);
-	bool publish_internal_fly_through(const Assignment &assignment, float altitude_m, uint32_t token);
+	bool publish_internal_fly_through(const Assignment &assignment, float altitude_m,
+					  float recovery_altitude_m, float minimum_clearance_m, uint32_t token);
 	CommandApplicationResult command_active_assignment();
 	bool assignment_cancellation_ready(const Assignment &assignment);
 	bool cancel_assignment_commands(const Assignment &assignment);
@@ -272,8 +299,10 @@ private:
 	void restore_intercept_tracking(const InterceptTracking &tracking);
 	bool intercept_assignment_matches(const Assignment &assignment) const;
 	bool intercept_transit_setpoint_matches(float expected_altitude_m) const;
+	bool intercept_recovery_setpoint_matches(float recovery_altitude_m) const;
 	bool intercept_loiter_setpoint_matches(float expected_altitude_m) const;
 	bool intercept_safety_gates_valid(const char **reason) const;
+	bool intercept_terrain_clearance_valid(float candidate_altitude_m, const char **reason) const;
 	float intercept_arrival_radius() const;
 
 	void send_ack(const Assignment &assignment, uint8_t result, const char *reason);
@@ -281,6 +310,7 @@ private:
 	void send_control_status();
 	void send_osd_vector();
 	void publish_status();
+	void apply_udp_peer_configuration();
 
 	bool load_state();
 	bool save_state();
@@ -320,6 +350,7 @@ private:
 	hrt_abstime _intercept_dwell_started{0};
 
 	vehicle_global_position_s _global_position{};
+	vehicle_local_position_s _local_position{};
 	vehicle_attitude_s _attitude{};
 	vehicle_land_detected_s _vehicle_land_detected{};
 	vehicle_status_s _vehicle_status{};
@@ -329,6 +360,7 @@ private:
 	uORB::Subscription _task_decision_sub{ORB_ID(mavlink_m_task_decision)};
 	uORB::Subscription _target_status_sub{ORB_ID(mavlink_m_target_status)};
 	uORB::Subscription _global_position_sub{ORB_ID(vehicle_global_position)};
+	uORB::Subscription _local_position_sub{ORB_ID(vehicle_local_position)};
 	uORB::Subscription _attitude_sub{ORB_ID(vehicle_attitude)};
 	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
 	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
@@ -348,6 +380,8 @@ private:
 	param_t _param_control_component{PARAM_INVALID};
 	param_t _param_control_link_id{PARAM_INVALID};
 	param_t _param_same_endpoint{PARAM_INVALID};
+	param_t _param_peer_limit{PARAM_INVALID};
+	param_t _param_peer_timeout{PARAM_INVALID};
 	param_t _param_rc_channel{PARAM_INVALID};
 	param_t _param_rc_reject{PARAM_INVALID};
 	param_t _param_rc_accept{PARAM_INVALID};
@@ -356,6 +390,7 @@ private:
 	param_t _param_intercept_radius{PARAM_INVALID};
 	param_t _param_intercept_dwell{PARAM_INVALID};
 	param_t _param_intercept_delta_z{PARAM_INVALID};
+	param_t _param_intercept_clearance{PARAM_INVALID};
 	param_t _param_nav_loiter_radius{PARAM_INVALID};
 	hrt_abstime _last_task_decision{0};
 
@@ -369,6 +404,8 @@ private:
 	int32_t _control_component{190};
 	int32_t _control_link_id{1};
 	int32_t _same_endpoint{0};
+	int32_t _peer_limit{4};
+	int32_t _peer_timeout_s{30};
 	int32_t _rc_channel{0};
 	int32_t _rc_reject{1300};
 	int32_t _rc_accept{1700};
@@ -377,6 +414,7 @@ private:
 	float _intercept_radius_m{25.f};
 	float _intercept_dwell_s{3.f};
 	float _intercept_delta_z_m{100.f};
+	float _intercept_clearance_m{30.f};
 	float _nav_loiter_radius_m{80.f};
 	InterceptPhase _intercept_phase{InterceptPhase::None};
 	uint32_t _intercept_message_id{0};
@@ -392,5 +430,8 @@ private:
 	bool _intercept_navigator_completed{false};
 	bool _intercept_navigator_missed{false};
 	bool _intercept_navigator_failed{false};
+	bool _udp_peer_configuration_dirty{true};
+	bool _signing_failure_warned{false};
+	hrt_abstime _last_signing_retry{0};
 	mavlink_m_target_status_s _control_status{};
 };

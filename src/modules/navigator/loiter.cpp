@@ -64,12 +64,16 @@ Loiter::on_inactive()
 
 void
 Loiter::prepare_fly_through(uint32_t token, hrt_abstime command_timestamp,
-		double target_lat, double target_lon, float target_alt)
+		double target_lat, double target_lon, float target_alt,
+		float recovery_alt, float minimum_clearance,
+		double recovery_lat, double recovery_lon, bool recovery_outbound)
 {
 	cancel_fly_through();
 
 	if (token == 0 || command_timestamp == 0 || !PX4_ISFINITE(target_lat)
-	    || !PX4_ISFINITE(target_lon) || !PX4_ISFINITE(target_alt)) {
+	    || !PX4_ISFINITE(target_lon) || !PX4_ISFINITE(target_alt)
+	    || !PX4_ISFINITE(recovery_alt) || !PX4_ISFINITE(minimum_clearance)
+	    || !PX4_ISFINITE(recovery_lat) || !PX4_ISFINITE(recovery_lon)) {
 		return;
 	}
 
@@ -78,6 +82,11 @@ Loiter::prepare_fly_through(uint32_t token, hrt_abstime command_timestamp,
 	_fly_through_pending_target_lat = target_lat;
 	_fly_through_pending_target_lon = target_lon;
 	_fly_through_pending_target_alt = target_alt;
+	_fly_through_pending_recovery_alt = recovery_alt;
+	_fly_through_pending_minimum_clearance = minimum_clearance;
+	_fly_through_pending_recovery_lat = recovery_lat;
+	_fly_through_pending_recovery_lon = recovery_lon;
+	_fly_through_pending_recovery_outbound = recovery_outbound;
 }
 
 void
@@ -88,6 +97,11 @@ Loiter::clear_fly_through_state()
 	_fly_through_pending_target_lat = static_cast<double>(NAN);
 	_fly_through_pending_target_lon = static_cast<double>(NAN);
 	_fly_through_pending_target_alt = NAN;
+	_fly_through_pending_recovery_alt = NAN;
+	_fly_through_pending_minimum_clearance = NAN;
+	_fly_through_pending_recovery_lat = static_cast<double>(NAN);
+	_fly_through_pending_recovery_lon = static_cast<double>(NAN);
+	_fly_through_pending_recovery_outbound = false;
 	_fly_through_active = false;
 	_fly_through_token = 0;
 	_fly_through_started = 0;
@@ -96,6 +110,13 @@ Loiter::clear_fly_through_state()
 	_fly_through_target_lat = static_cast<double>(NAN);
 	_fly_through_target_lon = static_cast<double>(NAN);
 	_fly_through_target_alt = NAN;
+	_fly_through_recovery_alt = NAN;
+	_fly_through_minimum_clearance = NAN;
+	_fly_through_recovery_lat = static_cast<double>(NAN);
+	_fly_through_recovery_lon = static_cast<double>(NAN);
+	_fly_through_recovery_outbound = false;
+	_fly_through_recovery_active = false;
+	_fly_through_target_hit = false;
 	_fly_through_approach_active = false;
 	_fly_through_approach_lat = static_cast<double>(NAN);
 	_fly_through_approach_lon = static_cast<double>(NAN);
@@ -253,6 +274,11 @@ Loiter::reposition()
 			const double target_lat = _fly_through_pending_target_lat;
 			const double target_lon = _fly_through_pending_target_lon;
 			const float target_alt = _fly_through_pending_target_alt;
+			const float recovery_alt = _fly_through_pending_recovery_alt;
+			const float minimum_clearance = _fly_through_pending_minimum_clearance;
+			const double recovery_lat = _fly_through_pending_recovery_lat;
+			const double recovery_lon = _fly_through_pending_recovery_lon;
+			const bool recovery_outbound = _fly_through_pending_recovery_outbound;
 			memcpy(pos_sp_triplet, rep, sizeof(*rep));
 			clear_fly_through_state();
 			_fly_through_active = true;
@@ -263,6 +289,11 @@ Loiter::reposition()
 			_fly_through_target_lat = target_lat;
 			_fly_through_target_lon = target_lon;
 			_fly_through_target_alt = target_alt;
+			_fly_through_recovery_alt = recovery_alt;
+			_fly_through_minimum_clearance = minimum_clearance;
+			_fly_through_recovery_lat = recovery_lat;
+			_fly_through_recovery_lon = recovery_lon;
+			_fly_through_recovery_outbound = recovery_outbound;
 			_fly_through_approach_active = approach_shape;
 			_fly_through_approach_lat = approach_shape ? rep->current.lat : static_cast<double>(NAN);
 			_fly_through_approach_lon = approach_shape ? rep->current.lon : static_cast<double>(NAN);
@@ -297,14 +328,23 @@ Loiter::reposition()
 bool
 Loiter::fly_through_endpoints_allowed()
 {
+	const float active_target_altitude = _fly_through_recovery_active
+					     ? _fly_through_recovery_alt : _fly_through_target_alt;
 	const bool target_allowed = _navigator->mavlink_m_fly_through_allowed(
-					_fly_through_target_lat, _fly_through_target_lon, _fly_through_target_alt);
+					_fly_through_target_lat, _fly_through_target_lon,
+					active_target_altitude, _fly_through_minimum_clearance);
 	const bool approach_allowed = !_fly_through_approach_active
 				      || _navigator->mavlink_m_fly_through_allowed(
 					      _fly_through_approach_lat, _fly_through_approach_lon,
-					      _fly_through_approach_alt);
+					      _fly_through_approach_alt, _fly_through_minimum_clearance);
+	const bool recovery_allowed = _navigator->mavlink_m_fly_through_allowed(
+					      _fly_through_recovery_lat, _fly_through_recovery_lon,
+					      _fly_through_recovery_alt, _fly_through_minimum_clearance)
+				      && _navigator->mavlink_m_fly_through_allowed(
+					      _fly_through_target_lat, _fly_through_target_lon,
+					      _fly_through_recovery_alt, _fly_through_minimum_clearance);
 
-	return target_allowed && approach_allowed;
+	return target_allowed && approach_allowed && recovery_allowed;
 }
 
 void
@@ -324,6 +364,39 @@ Loiter::update_fly_through()
 	position_setpoint_triplet_s *triplet = _navigator->get_position_setpoint_triplet();
 	const position_setpoint_s &current = triplet->current;
 	const position_setpoint_s &next = triplet->next;
+
+	if (_fly_through_recovery_active) {
+		const bool recovery_owned = current.valid
+					    && current.type == position_setpoint_s::SETPOINT_TYPE_POSITION
+					    && get_distance_to_next_waypoint(current.lat, current.lon,
+							    _fly_through_recovery_lat, _fly_through_recovery_lon) <= 1.f
+					    && fabsf(current.alt - _fly_through_recovery_alt) <= 1.f
+					    && !current.mavlink_m_exact_altitude
+					    && !next.valid;
+
+		if (!recovery_owned) {
+			cancel_fly_through();
+			return;
+		}
+
+		const float distance_to_recovery = get_distance_to_next_waypoint(
+				_navigator->get_global_position()->lat,
+				_navigator->get_global_position()->lon,
+				_fly_through_recovery_lat, _fly_through_recovery_lon);
+		const float horizontal_acceptance = PX4_ISFINITE(current.acceptance_radius)
+						    ? math::max(current.acceptance_radius, Navigator::MavlinkMHitRadiusM)
+						    : math::max(_navigator->get_acceptance_radius(), Navigator::MavlinkMHitRadiusM);
+		const float altitude_error = fabsf(
+						     _navigator->get_global_position()->alt - _fly_through_recovery_alt);
+
+		if (PX4_ISFINITE(distance_to_recovery) && distance_to_recovery <= horizontal_acceptance
+		    && PX4_ISFINITE(altitude_error) && altitude_error <= Navigator::MavlinkMHitRadiusM) {
+			promote_fly_through_recovery();
+		}
+
+		return;
+	}
+
 	const bool approach_owned = _fly_through_approach_active
 					    && current.valid && current.type == position_setpoint_s::SETPOINT_TYPE_POSITION
 					    && next.valid && next.type == position_setpoint_s::SETPOINT_TYPE_POSITION
@@ -345,9 +418,7 @@ Loiter::update_fly_through()
 						  _fly_through_target_lat, _fly_through_target_lon) <= 1.f
 					  && fabsf(current.alt - _fly_through_target_alt) <= 1.f
 					  && fabsf(next.alt - _fly_through_target_alt) <= 1.f;
-	const bool setpoint_owned = approach_owned || target_owned;
-
-	if (!setpoint_owned) {
+	if (!(approach_owned || target_owned)) {
 		cancel_fly_through();
 		return;
 	}
@@ -467,7 +538,7 @@ Loiter::update_fly_through()
 			const bool target_hit = PX4_ISFINITE(horizontal_miss) && PX4_ISFINITE(vertical_miss)
 						&& horizontal_miss <= Navigator::MavlinkMHitRadiusM
 						&& vertical_miss <= altitude_hit_radius;
-			complete_fly_through(target_hit, crossing_alt);
+			complete_fly_through(target_hit);
 			return;
 		}
 
@@ -523,31 +594,82 @@ Loiter::reset_fly_through_crossing_sample()
 }
 
 void
-Loiter::complete_fly_through(bool target_hit, float safe_loiter_altitude)
+Loiter::complete_fly_through(bool target_hit)
+{
+	position_setpoint_triplet_s *triplet = _navigator->get_position_setpoint_triplet();
+	const hrt_abstime now = hrt_absolute_time();
+	triplet->previous = triplet->current;
+	triplet->previous.timestamp = now;
+	triplet->previous.mavlink_m_exact_altitude = false;
+	_fly_through_target_hit = target_hit;
+
+	if (_fly_through_recovery_outbound) {
+		triplet->current = triplet->previous;
+		triplet->current.valid = true;
+		triplet->current.type = position_setpoint_s::SETPOINT_TYPE_POSITION;
+		triplet->current.lat = _fly_through_recovery_lat;
+		triplet->current.lon = _fly_through_recovery_lon;
+		triplet->current.alt = _fly_through_recovery_alt;
+		triplet->current.yaw = NAN;
+		triplet->current.yaw_valid = false;
+		triplet->current.acceptance_radius = math::max(
+				_navigator->get_acceptance_radius(),
+				Navigator::MavlinkMHitRadiusM);
+		triplet->current.mavlink_m_exact_altitude = false;
+		triplet->current.timestamp = now;
+		// Keep the recovery leg standalone so fixed-wing path smoothing cannot
+		// begin the target-centered turn before the straight climb-out completes.
+		triplet->next = position_setpoint_s{};
+		_fly_through_recovery_active = true;
+		_navigator->set_can_loiter_at_sp(false);
+
+	} else {
+		triplet->current = triplet->previous;
+		triplet->current.valid = true;
+		triplet->current.type = position_setpoint_s::SETPOINT_TYPE_LOITER;
+		triplet->current.lat = _fly_through_target_lat;
+		triplet->current.lon = _fly_through_target_lon;
+		triplet->current.alt = _fly_through_recovery_alt;
+		triplet->current.loiter_radius = _navigator->get_loiter_radius();
+		triplet->current.mavlink_m_exact_altitude = false;
+		triplet->current.timestamp = now;
+		triplet->next = position_setpoint_s{};
+	}
+
+	triplet->timestamp = now;
+	_navigator->set_position_setpoint_triplet_updated();
+
+	if (_fly_through_recovery_outbound) {
+		PX4_INFO("MAVLink-M exact target crossed; continuing straight to recovery altitude before loiter");
+
+	} else {
+		promote_fly_through_recovery();
+	}
+}
+
+void
+Loiter::promote_fly_through_recovery()
 {
 	position_setpoint_triplet_s *triplet = _navigator->get_position_setpoint_triplet();
 	const hrt_abstime now = hrt_absolute_time();
 	const uint32_t token = _fly_through_token;
-	triplet->previous = triplet->current;
-	triplet->previous.timestamp = now;
-	triplet->current = triplet->next;
-	triplet->current.timestamp = now;
+	const bool target_hit = _fly_through_target_hit;
 
-	if (!target_hit) {
-		const float current_altitude = _navigator->get_global_position()->alt;
-		const float hold_altitude = PX4_ISFINITE(safe_loiter_altitude)
-					    ? safe_loiter_altitude : current_altitude;
-
-		if (PX4_ISFINITE(hold_altitude)) {
-			triplet->previous.alt = hold_altitude;
-			triplet->current.alt = hold_altitude;
-		}
-
-		triplet->previous.mavlink_m_exact_altitude = false;
+	if (_fly_through_recovery_active) {
+		triplet->previous = triplet->current;
+		triplet->previous.timestamp = now;
+		triplet->current = triplet->previous;
+		triplet->current.valid = true;
+		triplet->current.type = position_setpoint_s::SETPOINT_TYPE_LOITER;
+		triplet->current.lat = _fly_through_target_lat;
+		triplet->current.lon = _fly_through_target_lon;
+		triplet->current.alt = _fly_through_recovery_alt;
+		triplet->current.loiter_radius = _navigator->get_loiter_radius();
 		triplet->current.mavlink_m_exact_altitude = false;
+		triplet->current.timestamp = now;
+		triplet->next = position_setpoint_s{};
 	}
 
-	triplet->next = position_setpoint_s{};
 	triplet->timestamp = now;
 	clear_fly_through_state();
 	_loiter_pos_set = true;
@@ -559,6 +681,6 @@ Loiter::complete_fly_through(bool target_hit, float safe_loiter_altitude)
 			target_hit ? 100 : 1);
 
 	if (!target_hit) {
-		PX4_WARN("MAVLink-M exact target was missed; holding at target-centered loiter");
+		PX4_WARN("MAVLink-M exact target missed; recovered to acceptance-altitude target loiter");
 	}
 }
