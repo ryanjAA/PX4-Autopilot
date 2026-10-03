@@ -1,9 +1,6 @@
 name: SBOM Monthly Audit
 
 on:
-  schedule:
-    # First Monday of each month at 09:00 UTC
-    - cron: '0 9 1-7 * 1'
   workflow_dispatch:
     inputs:
       branch:
