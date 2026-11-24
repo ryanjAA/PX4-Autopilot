@@ -1,0 +1,13 @@
+{
+    "board_id": 300,
+    "magic": "StratusFMUv6xFWv1",
+    "description": "Firmware for the StratusFMUv6X board",
+    "image": "",
+    "build_time": 0,
+    "summary": "StratusFMUv6X",
+    "version": "0.1",
+    "image_size": 0,
+    "image_maxsize": 1966080,
+    "git_identity": "",
+    "board_revision": 0
+}

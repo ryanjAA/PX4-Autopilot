@@ -44,7 +44,10 @@
 #if BOARD_NUM_SPI_CFG_HW_VERSIONS > 1
 void px4_set_spi_buses_from_hw_version()
 {
-#if defined(BOARD_HAS_SIMPLE_HW_VERSIONING)
+#if defined(BOARD_HAS_HW_SPLIT_VERSIONING)
+	// The sensor configuration belongs to the FMU module, independently of its base.
+	int hw_version_revision = GET_HW_FMUM_ID();
+#elif defined(BOARD_HAS_SIMPLE_HW_VERSIONING)
 	int hw_version_revision = board_get_hw_version();
 #else
 	int hw_version_revision = HW_VER_REV(board_get_hw_version(), board_get_hw_revision());

@@ -1,0 +1,97 @@
+#!/bin/sh
+#
+# Stratus Stratus v6X.x specific board sensors init
+#------------------------------------------------------------------------------
+set HAVE_PM2 yes
+set HAVE_PM3 yes
+
+# Check if manifest file describes multiple power monitors
+if mft query -q -k MFT -s MFT_PM2 -v 0
+then
+	set HAVE_PM2 no
+	set HAVE_PM3 no
+fi
+
+# If INA226 power monitors are enabled in MAVLink Parameters, startup INA226
+if param compare SENS_EN_INA226 1
+then
+	# Start INA226 on external I2C bus 1 with batt index 1
+	ina226 -X -b 1 -t 1 -k start
+
+	if [ $HAVE_PM2 = yes ]
+	then
+	        # Start second INA226 on external I2C bus 2 with batt index 2
+		ina226 -X -b 2 -t 2 -k start
+	fi
+
+	if [ $HAVE_PM3 = yes ]
+	then
+	        # Start third INA226 on external I2C bus 3 with batt index 3
+		ina226 -X -b 3 -t 3 -k start
+	fi
+fi
+
+
+# If INA228 power monitors are enabled in MAVLink Parameters, startup INA228
+if param compare SENS_EN_INA228 1
+then
+	# Start Digital power monitors
+	ina228 -X -b 1 -t 1 -k start
+
+	if [ $HAVE_PM2 = yes ]
+	then
+		ina228 -X -b 2 -t 2 -k start
+	fi
+
+	if [ $HAVE_PM3 = yes ]
+	then
+		ina228 -X -b 3 -t 3 -k start
+	fi
+fi
+
+# If INA238 power monitors are enabled in MAVLink Parameters, startup INA238
+if param compare SENS_EN_INA238 1
+then
+	# Start Digital power monitors
+	ina238 -X -b 1 -t 1 -k start
+
+	if [ $HAVE_PM2 = yes ]
+	then
+		ina238 -X -b 2 -t 2 -k start
+	fi
+
+	if [ $HAVE_PM3 = yes ]
+	then
+		ina238 -X -b 3 -t 3 -k start
+	fi
+fi
+
+# Magnetometer IST8310 on internal I2C4 with address 0x0C
+# ROTATION_YAW_180 = 4
+ist8310 -I -b 4 -a 0x0C -R 4 start
+
+# IMU IIM42652 on internal SPI1
+# YAW_45 = 1
+iim42652 -s -b 1 -R 1 start
+
+# IMU IIM42652 on internal SPI2
+# NONE = 0
+iim42652 -s -b 2 -R 0 start
+
+# IMU IIM42652 on internal SPI3
+# NONE = 0
+iim42652 -s -b 3 -R 0 start
+
+# Magnetometer BMM350 on internal I2C4 with address 0x14
+# ROTATION_NONE = 0
+bmm350 -I -b 4 -a 0x14 -R 0 start
+
+# Barometer BMP581 on internal I2C4 with address 0x47
+bmp581 -I -b 4 -a 0x47 start
+
+# Barometer BMP581 on internal I2C2 with address 0x46
+bmp581 -I -b 2 -a 0x46 start
+
+
+unset HAVE_PM2
+unset HAVE_PM3

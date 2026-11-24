@@ -51,7 +51,7 @@
 #include <lib/crc/crc.h>
 #include <lib/systemlib/px4_macros.h>
 
-#if defined(BOARD_HAS_HW_VERSIONING)
+#if defined(BOARD_HAS_HW_VERSIONING) || defined(BOARD_HAS_HW_SPLIT_VERSIONING)
 
 #  if defined(GPIO_HW_VER_REV_DRIVE)
 #    define GPIO_HW_REV_DRIVE GPIO_HW_VER_REV_DRIVE
