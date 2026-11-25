@@ -35,8 +35,10 @@ pipeline {
 
           def nuttx_builds_archive = [
             target: [
-                     "aa_cannode_canbootloader"
-                     "aa_cannode_default"
+                     "aa_cannode_v1_canbootloader",
+                     "aa_cannode_v1_default",
+                     "aa_cannode_v2_canbootloader",
+                     "aa_cannode_v2_default",
                      "airmind_mindpx-v2_default",
                      "ark_can-flow_canbootloader",
                      "ark_can-flow_default",

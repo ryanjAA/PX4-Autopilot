@@ -81,16 +81,26 @@ CONFIG:
       buildType: MinSizeRel
       settings:
         CONFIG: px4_fmu-v6x_bootloader
-    aa_cannode_default:
-      short: aa_cannode_default
+    aa_cannode_v1_default:
+      short: aa_cannode_v1_default
       buildType: MinSizeRel
       settings:
-        CONFIG: aa_cannode_default
-    aa_cannode_canbootloader:
-      short: aa_cannode_canbootloader
+        CONFIG: aa_cannode_v1_default
+    aa_cannode_v1_canbootloader:
+      short: aa_cannode_v1_canbootloader
       buildType: MinSizeRel
       settings:
-        CONFIG: aa_cannode_canbootloader
+        CONFIG: aa_cannode_v1_canbootloader
+    aa_cannode_v2_default:
+      short: aa_cannode_v2_default
+      buildType: MinSizeRel
+      settings:
+        CONFIG: aa_cannode_v2_default
+    aa_cannode_v2_canbootloader:
+      short: aa_cannode_v2_canbootloader
+      buildType: MinSizeRel
+      settings:
+        CONFIG: aa_cannode_v2_canbootloader
     airmind_mindpx-v2_default:
       short: airmind_mindpx-v2
       buildType: MinSizeRel
