@@ -59,7 +59,6 @@
 	 GPIO_PORTA | GPIO_PIN8 | GPIO_OUTPUT_CLEAR)
 
 #define FLASH_BASED_PARAMS
-#define CONFIG_I2C 1
 
 #define GPIO_USART2_RX_GPIO                                                    \
 	(GPIO_INPUT | GPIO_SPEED_50MHz | GPIO_PORTA | GPIO_PIN3)

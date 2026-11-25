@@ -147,6 +147,10 @@
 */
 /* Alternate function pin selections ************************************************/
 
+/* The STM32F103R pinmap in this NuttX version omits UART4. */
+#define GPIO_UART4_TX (GPIO_ALT | GPIO_CNF_AFPP | GPIO_MODE_50MHz | GPIO_PORTC | GPIO_PIN10)
+#define GPIO_UART4_RX (GPIO_INPUT | GPIO_CNF_INFLOAT | GPIO_MODE_INPUT | GPIO_PORTC | GPIO_PIN11)
+
 #define GPIO_I2C1_SCL_GPIO                  (GPIO_OUTPUT | GPIO_OPENDRAIN |GPIO_SPEED_50MHz | GPIO_OUTPUT_SET | GPIO_PORTB | GPIO_PIN8)
 #define GPIO_I2C1_SDA_GPIO                  (GPIO_OUTPUT | GPIO_OPENDRAIN |GPIO_SPEED_50MHz | GPIO_OUTPUT_SET | GPIO_PORTB | GPIO_PIN9)
 
